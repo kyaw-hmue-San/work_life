@@ -1,0 +1,183 @@
+import 'package:flutter/foundation.dart';
+
+import '../notifications/reminder_notifications.dart';
+
+import 'records.dart';
+import 'local_data_export.dart';
+import 'workspace_repository.dart';
+
+class WorkspaceModel extends ChangeNotifier {
+  WorkspaceModel(
+    this.repository, {
+    this.notifications,
+    String notificationScope = 'guest',
+  }) {
+    _notificationLease = notifications?.attach(notificationScope);
+    notifications?.addListener(_changed);
+  }
+  final WorkspaceRepository repository;
+  final ReminderNotifications? notifications;
+  int? _notificationLease;
+  bool _refreshingNotifications = false;
+  WorkspaceData data = const WorkspaceData();
+  bool loading = true, busy = false;
+  String? error;
+  bool _disposed = false;
+  int resetRevision = 0;
+  void _changed() {
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> load() async {
+    loading = true;
+    error = null;
+    _changed();
+    try {
+      data = await repository.readWorkspace();
+      await _syncNotifications();
+    } catch (_) {
+      error = 'Couldn’t load your saved workspace. Please retry.';
+    } finally {
+      loading = false;
+      _changed();
+    }
+  }
+
+  Future<bool> change(Future<void> Function() operation) async {
+    if (busy || loading) return false;
+    busy = true;
+    error = null;
+    _changed();
+    try {
+      await operation();
+      data = await repository.readWorkspace();
+      await _syncNotifications();
+      return true;
+    } catch (_) {
+      error = 'Couldn’t finish that change. Your saved records are kept. Please retry.';
+      return false;
+    } finally {
+      busy = false;
+      _changed();
+    }
+  }
+
+  Task? task(String id) {
+    for (final t in data.tasks) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  Future<void> _syncNotifications({bool requestPermission = false}) async {
+    if (_disposed || notifications == null) return;
+    await notifications!.reconcile(
+      _notificationLease!,
+      repository,
+      requestPermission: requestPermission,
+    );
+    if (_disposed) return;
+    // Notification failure must not turn a successful task save into an error.
+    try {
+      data = await repository.readWorkspace();
+    } catch (_) {
+      // Keep the last committed view; normal load can retry later.
+    }
+  }
+
+  Future<void> refreshNotifications({bool requestPermission = false}) async {
+    if (busy || loading || _refreshingNotifications || _disposed) return;
+    _refreshingNotifications = true;
+    try {
+      await _syncNotifications(requestPermission: requestPermission);
+    } finally {
+      _refreshingNotifications = false;
+      _changed();
+    }
+  }
+
+  FocusSession? get activeSession {
+    for (final s in data.sessions) {
+      if (s.outcome == null) return s;
+    }
+    return null;
+  }
+
+  TaskReminder? reminderFor(String taskId) {
+    for (final reminder in data.reminders) {
+      if (reminder.taskId == taskId) return reminder;
+    }
+    return null;
+  }
+
+  List<Task> tasksForDay(DateTime day) {
+    final key = dayKey(day);
+    final ids = data.plans
+        .where((p) => p.occursOn(day))
+        .map((p) => p.taskId)
+        .toSet();
+    return data.tasks
+        .where(
+          (t) =>
+              t.active &&
+              (ids.contains(t.id) ||
+                  (t.deadline != null && t.deadline!.compareTo(key) <= 0)),
+        )
+        .toList();
+  }
+
+  List<TaskReminder> get pendingReminders {
+    final activeIds = data.tasks
+        .where((t) => t.active)
+        .map((t) => t.id)
+        .toSet();
+    return data.reminders.where((r) => activeIds.contains(r.taskId)).toList()
+      ..sort((a, b) => a.scheduledAt.compareTo(b.scheduledAt));
+  }
+
+  Future<bool> setStatus(Task task, TaskStatus status) =>
+      change(() => repository.saveTask(task.withStatus(status)));
+
+  Future<String> exportLocalData() => LocalDataExport(repository).buildJson();
+
+  Future<bool> deleteLocalData() async {
+    if (busy || loading || _disposed) return false;
+    busy = true;
+    error = null;
+    _changed();
+    try {
+      if (notifications == null) {
+        await repository.clearLocalData();
+      } else {
+        await notifications!.deleteLocalData(_notificationLease!, repository);
+      }
+      // Discard stale records even if the subsequent read fails.
+      data = const WorkspaceData(
+        areas: ['Work', 'Study', 'Health', 'Relationships', 'Rest'],
+      );
+      resetRevision++;
+      try {
+        data = await repository.readWorkspace();
+      } catch (_) {
+        error =
+            'Local data was deleted. Couldn’t reload settings; please retry.';
+      }
+      await _syncNotifications();
+      return true;
+    } catch (_) {
+      error = 'Couldn’t delete local data. Notification cleanup or storage failed. Please retry.';
+      return false;
+    } finally {
+      busy = false;
+      _changed();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    notifications?.removeListener(_changed);
+    if (_notificationLease != null) notifications!.detach(_notificationLease!);
+    super.dispose();
+  }
+}
