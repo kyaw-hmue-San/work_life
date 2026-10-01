@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:work_life/captures/capture.dart';
+import 'package:work_life/ai/ai_proposals.dart';
+import 'package:work_life/ai/day_context_builder.dart';
 import 'package:work_life/workspace/records.dart';
 import 'package:work_life/workspace/workspace_model.dart';
 import 'package:work_life/workspace/workspace_repository.dart';
@@ -90,7 +92,10 @@ void main() {
   });
 
   test('reminder default persists and can be changed across reopen', () async {
-    expect((await repository.readWorkspace()).reminderDefault, ReminderDefault.none);
+    expect(
+      (await repository.readWorkspace()).reminderDefault,
+      ReminderDefault.none,
+    );
     await repository.saveReminderDefault(ReminderDefault.thirtyMinutesBefore);
     await repository.close();
     expect(
@@ -176,36 +181,264 @@ void main() {
     expect((await repository.readWorkspace()).reminders, isEmpty);
   });
 
-  test('clearLocalData removes workspace content and resets settings after reopen', () async {
-    final task = Task(id: newId(), title: 'Delete me', area: 'Work');
-    await repository.saveTask(task);
-    await repository.saveReminderDefault(ReminderDefault.atTime);
-    await repository.saveQuietHours(
-      const QuietHours(enabled: true, startMinute: 22 * 60, endMinute: 6 * 60),
-    );
-    await repository.saveReminder(
-      TaskReminder(
+  test(
+    'date-only deadline receives and reschedules its generated reminder',
+    () async {
+      await repository.saveReminderDefault(ReminderDefault.thirtyMinutesBefore);
+      final due = DateTime.now().add(const Duration(days: 3));
+      final task = Task(
         id: newId(),
-        taskId: task.id,
-        scheduledAt: DateTime.now().toUtc().add(const Duration(hours: 1)),
-      ),
+        title: 'Submit assignment',
+        area: 'Study',
+        deadline: dayKey(due),
+      );
+      await repository.saveTask(task);
+      var data = await repository.readWorkspace();
+      expect(data.reminders, hasLength(1));
+      expect(data.reminders.single.basis, ReminderBasis.dueDate);
+      expect(
+        data.reminders.single.scheduledAt,
+        DateTime(due.year, due.month, due.day, 8, 30).toUtc(),
+      );
+
+      final changed = due.add(const Duration(days: 2));
+      await repository.saveTask(
+        Task(
+          id: task.id,
+          title: task.title,
+          area: task.area,
+          deadline: dayKey(changed),
+        ),
+      );
+      data = await repository.readWorkspace();
+      expect(data.reminders, hasLength(1));
+      expect(
+        data.reminders.single.scheduledAt,
+        DateTime(changed.year, changed.month, changed.day, 8, 30).toUtc(),
+      );
+    },
+  );
+
+  test(
+    'explicit reminder and explicit no-reminder override date-only defaults',
+    () async {
+      await repository.saveReminderDefault(ReminderDefault.atTime);
+      final due = DateTime.now().add(const Duration(days: 3));
+      final task = Task(
+        id: newId(),
+        title: 'Call lecturer',
+        area: 'Study',
+        deadline: dayKey(due),
+      );
+      await repository.saveTask(task);
+      final chosen = DateTime.now().toUtc().add(const Duration(hours: 4));
+      await repository.saveReminder(
+        TaskReminder(id: newId(), taskId: task.id, scheduledAt: chosen),
+      );
+      await repository.saveTask(task);
+      var data = await repository.readWorkspace();
+      expect(data.reminders.single.scheduledAt, chosen);
+      expect(data.reminders.single.basis, ReminderBasis.explicit);
+
+      await repository.removeReminder(task.id);
+      await repository.saveTask(task);
+      await repository.saveReminderDefault(ReminderDefault.thirtyMinutesBefore);
+      data = await repository.readWorkspace();
+      expect(data.reminders, isEmpty);
+      expect(data.suppressedTaskIds, contains(task.id));
+    },
+  );
+
+  test('completion and reset remove generated due reminders', () async {
+    await repository.saveReminderDefault(ReminderDefault.atTime);
+    final due = DateTime.now().add(const Duration(days: 3));
+    final task = Task(
+      id: newId(),
+      title: 'Renew pass',
+      area: 'Work',
+      deadline: dayKey(due),
     );
-    await repository.removeReminder(task.id);
+    await repository.saveTask(task);
+    expect((await repository.readWorkspace()).reminders, hasLength(1));
+    await repository.saveTask(task.withStatus(TaskStatus.completed));
+    expect((await repository.readWorkspace()).reminders, isEmpty);
+
+    final second = Task(
+      id: newId(),
+      title: 'File report',
+      area: 'Work',
+      deadline: dayKey(due),
+    );
+    await repository.saveTask(second);
+    expect((await repository.readWorkspace()).reminders, hasLength(1));
     await repository.clearLocalData();
-    await repository.close();
-    final data = await repository.readWorkspace();
-    expect(data.tasks, isEmpty);
-    expect(data.projects, isEmpty);
-    expect(data.plans, isEmpty);
-    expect(data.reminders, isEmpty);
-    expect(data.suppressedTaskIds, isEmpty);
-    expect(data.routines, isEmpty);
-    expect(data.routineRecords, isEmpty);
-    expect(data.sessions, isEmpty);
-    expect(data.quietHours.enabled, isFalse);
-    expect(data.reminderDefault, ReminderDefault.none);
-    expect(data.areas, ['Work', 'Study', 'Health', 'Relationships', 'Rest']);
+    expect((await repository.readWorkspace()).reminders, isEmpty);
   });
+
+  test(
+    'project AI diff applies selected add change move remove once',
+    () async {
+      final project = Project(id: newId(), title: 'AWS', area: 'Study');
+      await repository.saveProject(project);
+      final changed = Task(
+        id: newId(),
+        title: 'Study AWS',
+        area: 'Study',
+        projectId: project.id,
+      );
+      final moved = Task(
+        id: newId(),
+        title: 'Practice exam',
+        area: 'Study',
+        projectId: project.id,
+        deadline: '2035-04-12',
+      );
+      final removed = Task(
+        id: newId(),
+        title: 'Old task',
+        area: 'Study',
+        projectId: project.id,
+      );
+      final rejected = Task(
+        id: newId(),
+        title: 'Keep me',
+        area: 'Study',
+        projectId: project.id,
+      );
+      for (final task in [changed, moved, removed, rejected]) {
+        await repository.saveTask(task);
+      }
+      final proposal = AiProjectProposal(
+        title: 'AWS',
+        area: 'Study',
+        tasks: [
+          AiTaskProposal(title: 'Take mock exam', change: AiProjectChange.add),
+          AiTaskProposal(
+            taskId: changed.id,
+            title: 'Study AWS Core Services',
+            change: AiProjectChange.change,
+          ),
+          AiTaskProposal(
+            taskId: moved.id,
+            title: moved.title,
+            deadline: '2035-04-15',
+            change: AiProjectChange.move,
+          ),
+          AiTaskProposal(
+            taskId: removed.id,
+            title: removed.title,
+            change: AiProjectChange.remove,
+          ),
+          AiTaskProposal(
+            taskId: rejected.id,
+            title: 'AI wanted to change this',
+            change: AiProjectChange.change,
+            included: false,
+          ),
+        ],
+      );
+      await repository.applyProjectProposal(
+        proposal,
+        operationId: 'diff-once',
+        targetProjectId: project.id,
+      );
+      await repository.applyProjectProposal(
+        proposal,
+        operationId: 'diff-once',
+        targetProjectId: project.id,
+      );
+      final data = await repository.readWorkspace();
+      expect(
+        data.tasks.where((task) => task.projectId == project.id),
+        hasLength(4),
+      );
+      expect(
+        data.tasks.singleWhere((task) => task.id == changed.id).title,
+        'Study AWS Core Services',
+      );
+      expect(
+        data.tasks.singleWhere((task) => task.id == moved.id).deadline,
+        '2035-04-15',
+      );
+      expect(
+        data.tasks.singleWhere((task) => task.id == removed.id).status,
+        TaskStatus.cancelled,
+      );
+      expect(
+        data.tasks.singleWhere((task) => task.id == rejected.id).title,
+        'Keep me',
+      );
+    },
+  );
+
+  test(
+    'project AI diff rolls back all changes when one operation is invalid',
+    () async {
+      final project = Project(id: newId(), title: 'Safe project', area: 'Work');
+      await repository.saveProject(project);
+      final proposal = AiProjectProposal(
+        title: 'Changed title',
+        area: 'Work',
+        tasks: [
+          AiTaskProposal(title: 'Would be added', change: AiProjectChange.add),
+          AiTaskProposal(
+            taskId: 'missing',
+            title: 'Missing',
+            change: AiProjectChange.remove,
+          ),
+        ],
+      );
+      await expectLater(
+        repository.applyProjectProposal(
+          proposal,
+          operationId: 'failing-diff',
+          targetProjectId: project.id,
+        ),
+        throwsArgumentError,
+      );
+      final data = await repository.readWorkspace();
+      expect(data.projects.single.title, 'Safe project');
+      expect(data.tasks, isEmpty);
+    },
+  );
+
+  test(
+    'clearLocalData removes workspace content and resets settings after reopen',
+    () async {
+      final task = Task(id: newId(), title: 'Delete me', area: 'Work');
+      await repository.saveTask(task);
+      await repository.saveReminderDefault(ReminderDefault.atTime);
+      await repository.saveQuietHours(
+        const QuietHours(
+          enabled: true,
+          startMinute: 22 * 60,
+          endMinute: 6 * 60,
+        ),
+      );
+      await repository.saveReminder(
+        TaskReminder(
+          id: newId(),
+          taskId: task.id,
+          scheduledAt: DateTime.now().toUtc().add(const Duration(hours: 1)),
+        ),
+      );
+      await repository.removeReminder(task.id);
+      await repository.clearLocalData();
+      await repository.close();
+      final data = await repository.readWorkspace();
+      expect(data.tasks, isEmpty);
+      expect(data.projects, isEmpty);
+      expect(data.plans, isEmpty);
+      expect(data.reminders, isEmpty);
+      expect(data.suppressedTaskIds, isEmpty);
+      expect(data.routines, isEmpty);
+      expect(data.routineRecords, isEmpty);
+      expect(data.sessions, isEmpty);
+      expect(data.quietHours.enabled, isFalse);
+      expect(data.reminderDefault, ReminderDefault.none);
+      expect(data.areas, ['Work', 'Study', 'Health', 'Relationships', 'Rest']);
+    },
+  );
 
   test('v4 upgrade preserves intent and delivery status survives reopen without overwriting reschedules', () async {
     final task = Task(id: newId(), title: 'Rest', area: 'Rest');
@@ -615,4 +848,513 @@ void main() {
     expect(data.routineRecords.single.outcome, 'smaller');
     expect(data.routineRecords.where((r) => r.day == '2026-09-08'), isEmpty);
   });
+
+  test(
+    'AI schedule approval is atomic, idempotent, and reuses reminder defaults',
+    () async {
+      const task = Task(
+        id: 'ai-task',
+        title: 'Prepare presentation',
+        area: 'Work',
+        priority: TaskPriority.high,
+      );
+      await repository.saveTask(task);
+      await repository.saveReminderDefault(ReminderDefault.thirtyMinutesBefore);
+      await repository.savePlan(
+        PlanBlock(
+          id: 'fixed',
+          title: 'Class',
+          start: DateTime(2099, 4, 16, 9),
+          minutes: 60,
+          area: 'Study',
+          fixed: true,
+        ),
+      );
+      final event = AiScheduleEvent(
+        title: task.title,
+        taskId: task.id,
+        date: '2099-04-16',
+        start: '09:30',
+        end: '10:30',
+      );
+      final proposal = AiScheduleProposal(events: [event]);
+      await expectLater(
+        repository.applyScheduleProposal(proposal, operationId: 'schedule'),
+        throwsArgumentError,
+      );
+      event.start = '10:30';
+      event.end = '11:30';
+      await repository.applyScheduleProposal(proposal, operationId: 'schedule');
+      await repository.applyScheduleProposal(proposal, operationId: 'schedule');
+      final data = await repository.readWorkspace();
+      expect(data.tasks.single.priority, TaskPriority.high);
+      expect(data.plans, hasLength(2));
+      expect(data.reminders, hasLength(1));
+      expect(
+        data.reminders.single.scheduledAt.toLocal(),
+        DateTime(2099, 4, 16, 10),
+      );
+    },
+  );
+
+  test('lifestyle blocks persist in Planner without creating tasks and buffers protect class', () async {
+    await repository.saveRecurringSchedule(
+      const RecurringSchedule(
+        id: 'class',
+        title: 'Class',
+        type: RecurringScheduleType.classSession,
+        weekday: 1,
+        startTime: '09:00',
+        endTime: '12:00',
+        startDate: '2030-01-01',
+      ),
+    );
+    final proposal = AiScheduleProposal(
+      events: [
+        AiScheduleEvent(
+          title: 'Exercise',
+          date: '2030-01-07',
+          start: '12:15',
+          end: '13:00',
+          kind: 'exercise',
+        ),
+      ],
+    );
+    await repository.applyScheduleProposal(proposal, operationId: 'lifestyle');
+    final data = await repository.readWorkspace();
+    expect(data.tasks, isEmpty);
+    expect(data.plans.single.title, 'Exercise');
+    await expectLater(
+      repository.applyScheduleProposal(
+        AiScheduleProposal(
+          events: [
+            AiScheduleEvent(
+              title: 'Travel',
+              date: '2030-01-07',
+              start: '11:50',
+              end: '12:20',
+              kind: 'travel',
+            ),
+          ],
+        ),
+        operationId: 'buffered',
+      ),
+      throwsArgumentError,
+    );
+  });
+
+  test('AI removal is user-approved, editable plans only, and sleep limits are enforced', () async {
+    final plan = PlanBlock(
+      id: 'flex',
+      title: 'Study',
+      start: DateTime(2030, 1, 7, 18),
+      minutes: 60,
+      area: 'Study',
+    );
+    await repository.savePlan(plan);
+    await repository.applyScheduleProposal(
+      AiScheduleProposal(
+        events: [
+          AiScheduleEvent(
+            title: 'Study',
+            planId: 'flex',
+            date: '2030-01-07',
+            start: '18:00',
+            end: '19:00',
+            operation: 'remove',
+          ),
+        ],
+      ),
+      operationId: 'remove-flex',
+    );
+    expect((await repository.readWorkspace()).plans, isEmpty);
+    await expectLater(
+      repository.applyScheduleProposal(
+        AiScheduleProposal(
+          events: [
+            AiScheduleEvent(
+              title: 'Late work',
+              date: '2030-01-07',
+              start: '22:00',
+              end: '22:30',
+              taskId: null,
+              kind: 'task',
+            ),
+          ],
+        ),
+        operationId: 'late',
+      ),
+      throwsArgumentError,
+    );
+  });
+
+  test(
+    'AI schedule changes require stable IDs and preserve task links',
+    () async {
+      const task = Task(id: 'linked-task', title: 'Assignment', area: 'Study');
+      await repository.saveTask(task);
+      await repository.savePlan(
+        PlanBlock(
+          id: 'linked-plan',
+          title: task.title,
+          taskId: task.id,
+          start: DateTime(2030, 1, 7, 14),
+          minutes: 60,
+          area: task.area,
+        ),
+      );
+
+      await expectLater(
+        repository.applyScheduleProposal(
+          AiScheduleProposal(
+            events: [
+              AiScheduleEvent(
+                title: 'Missing identity',
+                date: '2030-01-07',
+                start: '16:00',
+                end: '17:00',
+                operation: 'move',
+              ),
+            ],
+          ),
+          operationId: 'missing-plan-id',
+        ),
+        throwsArgumentError,
+      );
+
+      await repository.applyScheduleProposal(
+        AiScheduleProposal(
+          events: [
+            AiScheduleEvent(
+              title: task.title,
+              planId: 'linked-plan',
+              date: '2030-01-07',
+              start: '16:00',
+              end: '17:00',
+              operation: 'move',
+            ),
+          ],
+        ),
+        operationId: 'preserve-task-link',
+      );
+      final moved = (await repository.readWorkspace()).plans.single;
+      expect(moved.taskId, task.id);
+      expect(moved.start, DateTime(2030, 1, 7, 16));
+    },
+  );
+
+  test(
+    'partial schedule acceptance cannot overlap an untouched flexible block',
+    () async {
+      await repository.savePlan(
+        PlanBlock(
+          id: 'kept-plan',
+          title: 'Keep me',
+          start: DateTime(2030, 1, 7, 10),
+          minutes: 60,
+          area: 'Work',
+        ),
+      );
+      await expectLater(
+        repository.applyScheduleProposal(
+          AiScheduleProposal(
+            events: [
+              AiScheduleEvent(
+                title: 'Remove kept block',
+                planId: 'kept-plan',
+                operation: 'remove',
+                included: false,
+              ),
+              AiScheduleEvent(
+                title: 'Exercise',
+                date: '2030-01-07',
+                start: '10:30',
+                end: '11:15',
+                kind: 'exercise',
+              ),
+            ],
+          ),
+          operationId: 'partial-overlap',
+        ),
+        throwsArgumentError,
+      );
+      expect((await repository.readWorkspace()).plans.single.id, 'kept-plan');
+    },
+  );
+
+  test('malformed negative AI clock values are rejected', () async {
+    await expectLater(
+      repository.applyScheduleProposal(
+        AiScheduleProposal(
+          events: [
+            AiScheduleEvent(
+              title: 'Normalized by DateTime',
+              date: '2030-01-07',
+              start: '09:-1',
+              end: '09:30',
+              kind: 'personal',
+            ),
+          ],
+        ),
+        operationId: 'negative-clock',
+      ),
+      throwsArgumentError,
+    );
+    expect((await repository.readWorkspace()).plans, isEmpty);
+  });
+
+  test(
+    'schedule proposal rejects material Planner changes without partial writes',
+    () async {
+      final day = DateTime(2030, 1, 7);
+      final before = await repository.readWorkspace();
+      final proposal = AiScheduleProposal(
+        baseFingerprints: {
+          dayKey(day): const DayContextBuilder().fingerprint(before, day),
+        },
+        events: [
+          AiScheduleEvent(
+            title: 'Exercise',
+            date: dayKey(day),
+            start: '10:00',
+            end: '10:30',
+            kind: 'exercise',
+          ),
+        ],
+      );
+      await repository.savePlan(
+        PlanBlock(
+          id: 'new-fixed',
+          title: 'New appointment',
+          start: DateTime(2030, 1, 7, 14),
+          minutes: 30,
+          area: 'Work',
+          fixed: true,
+        ),
+      );
+
+      await expectLater(
+        repository.applyScheduleProposal(proposal, operationId: 'stale-plan'),
+        throwsA(isA<StaleScheduleProposalException>()),
+      );
+      final plans = (await repository.readWorkspace()).plans;
+      expect(plans.map((plan) => plan.id), ['new-fixed']);
+    },
+  );
+
+  test('irrelevant changes keep a proposal valid and regeneration refreshes its base', () async {
+    final day = DateTime(2030, 1, 7);
+    final builder = const DayContextBuilder();
+    final oldBase = builder.fingerprint(await repository.readWorkspace(), day);
+    await repository.saveTask(
+      const Task(id: 'distant', title: 'Someday', area: 'Work'),
+    );
+    expect(builder.fingerprint(await repository.readWorkspace(), day), oldBase);
+
+    final proposal = AiScheduleProposal(
+      baseFingerprints: {dayKey(day): oldBase},
+      events: [
+        AiScheduleEvent(
+          title: 'Walk',
+          date: dayKey(day),
+          start: '10:00',
+          end: '10:30',
+          kind: 'exercise',
+        ),
+      ],
+    );
+    await repository.applyScheduleProposal(proposal, operationId: 'fresh-base');
+    expect((await repository.readWorkspace()).plans.single.title, 'Walk');
+
+    final regenerated = AiScheduleProposal(
+      baseFingerprints: {
+        dayKey(day): builder.fingerprint(await repository.readWorkspace(), day),
+      },
+      events: [
+        AiScheduleEvent(
+          title: 'Read',
+          date: dayKey(day),
+          start: '11:00',
+          end: '11:30',
+          kind: 'personal',
+        ),
+      ],
+    );
+    await repository.applyScheduleProposal(
+      regenerated,
+      operationId: 'regenerated-base',
+    );
+    expect((await repository.readWorkspace()).plans, hasLength(2));
+  });
+
+  test('recurrence exception makes an existing day proposal stale', () async {
+    final day = DateTime(2030, 1, 7);
+    await repository.saveRecurringSchedule(
+      const RecurringSchedule(
+        id: 'class-stale',
+        title: 'Class',
+        type: RecurringScheduleType.classSession,
+        weekday: DateTime.monday,
+        startTime: '09:00',
+        endTime: '10:00',
+        startDate: '2030-01-01',
+      ),
+    );
+    final builder = const DayContextBuilder();
+    final proposal = AiScheduleProposal(
+      baseFingerprints: {
+        dayKey(day): builder.fingerprint(await repository.readWorkspace(), day),
+      },
+      events: [
+        AiScheduleEvent(
+          title: 'Lunch',
+          date: dayKey(day),
+          start: '12:00',
+          end: '12:30',
+          kind: 'meal',
+        ),
+      ],
+    );
+    await repository.saveScheduleException(
+      const ScheduleException(scheduleId: 'class-stale', day: '2030-01-07'),
+    );
+    await expectLater(
+      repository.applyScheduleProposal(
+        proposal,
+        operationId: 'stale-recurrence',
+      ),
+      throwsA(isA<StaleScheduleProposalException>()),
+    );
+    expect((await repository.readWorkspace()).plans, isEmpty);
+  });
+
+  test('deleted linked Task rejects its stale proposal atomically', () async {
+    final day = DateTime(2030, 1, 7);
+    const task = Task(
+      id: 'deleted-proposal-task',
+      title: 'Assignment',
+      area: 'Study',
+      deadline: '2030-01-07',
+    );
+    await repository.saveTask(task);
+    final proposal = AiScheduleProposal(
+      baseFingerprints: {
+        dayKey(day): const DayContextBuilder().fingerprint(
+          await repository.readWorkspace(),
+          day,
+        ),
+      },
+      events: [
+        AiScheduleEvent(
+          title: task.title,
+          taskId: task.id,
+          date: dayKey(day),
+          start: '13:00',
+          end: '14:00',
+        ),
+      ],
+    );
+    await (await repository.database.open()).delete(
+      'tasks',
+      where: 'id = ?',
+      whereArgs: [task.id],
+    );
+    await expectLater(
+      repository.applyScheduleProposal(proposal, operationId: 'deleted-task'),
+      throwsA(isA<StaleScheduleProposalException>()),
+    );
+    expect((await repository.readWorkspace()).plans, isEmpty);
+  });
+
+  test(
+    'weekly proposal moves across days and keeps split sessions linked',
+    () async {
+      const task = Task(
+        id: 'weekly-task',
+        title: 'Prepare release',
+        area: 'Work',
+        deadline: '2030-01-13',
+        minutes: 120,
+      );
+      await repository.saveTask(task);
+      await repository.savePlan(
+        PlanBlock(
+          id: 'existing-session',
+          title: task.title,
+          taskId: task.id,
+          start: DateTime(2030, 1, 7, 9),
+          minutes: 60,
+          area: task.area,
+        ),
+      );
+      final snapshot = await repository.readWorkspace();
+      final proposal = AiScheduleProposal(
+        baseFingerprints: const WeekContextBuilder().fingerprints(
+          snapshot,
+          DateTime(2030, 1, 7),
+        ),
+        events: [
+          AiScheduleEvent(
+            planId: 'existing-session',
+            taskId: task.id,
+            title: 'Prepare release · part 1',
+            date: '2030-01-09',
+            start: '09:00',
+            end: '10:00',
+            operation: 'move',
+          ),
+          AiScheduleEvent(
+            taskId: task.id,
+            title: 'Prepare release · part 2',
+            date: '2030-01-11',
+            start: '09:00',
+            end: '10:00',
+          ),
+        ],
+      );
+      await repository.applyScheduleProposal(
+        proposal,
+        operationId: 'week-plan',
+      );
+      final data = await repository.readWorkspace();
+      expect(data.tasks.where((item) => item.id == task.id), hasLength(1));
+      expect(data.plans.where((plan) => plan.taskId == task.id), hasLength(2));
+      expect(
+        data.plans.map((plan) => dayKey(plan.start)),
+        containsAll(['2030-01-09', '2030-01-11']),
+      );
+    },
+  );
+
+  test(
+    'weekly proposal cannot schedule linked work after its deadline',
+    () async {
+      await repository.saveTask(
+        const Task(
+          id: 'deadline-task',
+          title: 'Submit application',
+          area: 'Work',
+          deadline: '2030-01-10',
+        ),
+      );
+      await expectLater(
+        repository.applyScheduleProposal(
+          AiScheduleProposal(
+            events: [
+              AiScheduleEvent(
+                taskId: 'deadline-task',
+                title: 'Submit application',
+                date: '2030-01-11',
+                start: '09:00',
+                end: '10:00',
+              ),
+            ],
+          ),
+          operationId: 'late-week-plan',
+        ),
+        throwsArgumentError,
+      );
+      expect((await repository.readWorkspace()).plans, isEmpty);
+    },
+  );
 }

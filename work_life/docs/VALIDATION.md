@@ -1,5 +1,84 @@
 # Pilot validation plan
 
+## Multi-device synchronization — 27 September 2026
+
+- SQLite schema v14 adds a durable coalescing outbox, remote revision metadata,
+  incremental checkpoint and trigger suppression for downloaded transactions.
+- Supabase migration adds owner-bound workspaces, RLS-protected versioned
+  records, mutation receipts and an authenticated idempotent write RPC.
+- Deterministic fake-remote tests use independent device databases and cover
+  create/update/completion, first-sync local/remote merge, project/task links,
+  stable checklist IDs, offline restart, bounded retry, lost responses,
+  duplicate prevention, remote deletion, stale-device tombstone protection,
+  reminder intent without delivery bookkeeping, and workspace isolation.
+- Authenticated startup, resume, local mutation, Inbox capture and manual retry
+  trigger sync. Guest workspaces remain local. Settings exposes safe sync state.
+- `flutter analyze --no-pub`: passed with no issues.
+- `flutter test --no-pub`: all 110 tests passed, including nine focused sync
+  tests.
+- iOS simulator debug build: passed for `com.worklife.app`.
+- Android release AAB build: passed; produced a 56.6 MB unsigned validation
+  artifact.
+- `git diff --check`: passed.
+- Live Supabase deployment and physical multi-device acceptance remain external;
+  automated tests do not prove production networking or OS lifecycle delivery.
+
+## Production continuation checkpoint — 26 September 2026
+
+LAST COMPLETED:
+
+- AI capture classification routes standalone tasks, projects, routines,
+  reminders, and planning requests into native editable approval screens.
+- Existing-project AI review shows ADD, CHANGE, MOVE, REMOVE, and UNCHANGED
+  operations with per-item acceptance/editing and atomic/idempotent apply.
+- Date-only deadlines generate deterministic 9:00 AM local reminders adjusted
+  by Reminder Defaults, while explicit reminders, suppression, planned times,
+  Quiet Hours, snooze, stable IDs, completion, and reset remain authoritative.
+- Production AI calls use an authenticated Supabase Edge Function. Release
+  builds cannot use a compiled direct provider key.
+- Android/iOS identifiers and permission configuration are release-oriented;
+  Android release never falls back to debug signing.
+
+CURRENT VERIFIED STATE:
+
+- Flutter analyzer: no issues.
+- Flutter tests: all 101 passed.
+- iOS simulator debug build: passed for `com.worklife.app`.
+- Android release AAB build: passed, 56.4 MB, intentionally unsigned because
+  no private upload keystore was supplied.
+
+CURRENT WORKING AREA:
+
+- Clean implementation checkpoint; no intentionally partial refactor.
+
+SUBSEQUENTLY COMPLETED:
+
+- Offline-first multi-device Supabase workspace synchronization/remote backup
+  is implemented and validated in the 27 September checkpoint above.
+
+EXTERNAL BLOCKERS:
+
+- Deploy `supabase/functions/ai-proxy` and configure its server-side
+  `AIMLAPI_KEY`.
+- Supply Android upload keystore and Apple Team/profile/certificates.
+- External validation required: physical device unavailable in this
+  environment. Validate notifications, snooze actions, reboot/force-close,
+  OAuth callback, photo picker, accessibility, and lifecycle behavior on both
+  Android and iPhone.
+
+## Current implementation checkpoint — 25 September 2026
+
+- Added daily/weekly reminder recurrence with schema version 10 migration, resume-time next-occurrence advancement, snooze compatibility, and export/restore support.
+- Added exercise routine templates and seven-day exercise progress in Life Map.
+- Added focus presets (15/25/50 minutes plus task default) and weekly focus outcome history.
+- Added weekly review metrics for focus, routines, exercise, and life areas.
+- Added paste-based version-1 JSON backup restore with dependency-ordered workspace reconstruction.
+- Added an offline capture-assistant fallback that suggests task/question/reflection/idea handling without modifying original text.
+- `flutter analyze --no-pub`: passed with no issues.
+- `flutter test --no-pub`: all 77 tests passed.
+- `sh tool/flutter_android.sh build apk --release --no-pub`: passed; produced `build/app/outputs/flutter-apk/app-release.apk`.
+- Current environment exposes macOS and Chrome only; no Android emulator, iPhone simulator, physical phone, or wireless device is available. OS notification delivery, reboot/force-close behavior, screen-reader behavior, native sharing/restore sheets, and release signing remain unverified.
+
 ## Routine levels — 12 September 2026
 
 - `flutter analyze --no-pub`: passed, no issues found.
@@ -104,6 +183,55 @@ Record device model, OS version, app build, timezone, permissions, steps, expect
 ## Pilot feedback
 
 Measure baseline before selecting success targets. Review missed commitments, capture effort, rescheduling behavior, useful focus sessions, recovered ideas, and whether planning leaves room for personal life. Keep feedback and findings dated; do not present these proposed checks as completed tests.
+
+## Day Architect implementation — 28 September 2026
+
+- Added schema v17 persistence and sync triggers for recurring schedules, per-date cancellation/time/move exceptions, and planning preferences; schedule context is filtered by weekday and semester bounds.
+- Schedule-image weekday parsing and the editable proposal path support saving selected timetable items as weekly commitments with a chosen date range. Settings supports add/edit/remove, fixed weekdays/times/date ranges/location, cancellation/time-change exceptions, and planning preferences. Onboarding links to this setup as optional.
+- `DayContextBuilder` and `WeekContextBuilder` tests cover date-specific classes, exceptions, semester boundaries, preference context, and Monday-to-Sunday structure. SQLite and fake-remote sync checks cover durable sync queue entries; backup round-trip covers new records.
+- Proposal application retains approval/idempotency, protects locked/fixed blocks, supports selected remove operations, and validates wake/bed boundaries, focused-work cutoff, recurring commitments, transition buffers, overlaps, and approximate daily capacity. Lifestyle blocks do not create tasks.
+- Final validation: `/Users/rioo/flutter/bin/flutter analyze --no-pub` passed with no issues; `/Users/rioo/flutter/bin/flutter test --no-pub --reporter compact` passed all 117 tests; `git diff --check` passed. Widget tests emitted an existing onboarding off-screen tap warning, but the suite passed.
+- Not validated here: real AIMLAPI/provider output, physical Android/iPhone behavior, Android release signing, live Supabase migration application, and actual two-device Supabase exchange. Apply both sync migrations to the project before remote sync of Day Architect entities.
+
+## Day Architect post-implementation audit — 28 September 2026
+
+- Reproduced and fixed proposal-safety defects: negative clock components could normalize to a different wall time; MOVE/CHANGE could lack a stable Planner ID; a changed block could lose its Task link; and partial acceptance could overlap a rejected/untouched flexible block. Regression tests now require strict clock ranges, stable identities, preserved task links, and overlap/capacity validation against retained Planner blocks.
+- Reproduced and fixed recurrence-exception ambiguity. Exceptions now require an existing schedule and a real occurrence inside its date range, reject cancellation mixed with move/time data, and require complete valid time pairs when changing an occurrence.
+- Reproduced and fixed sync retry starvation: one delayed outbox row no longer hides later mutations that are ready to upload.
+- Reproduced and fixed recovery gaps: restore now parses all optional Day Architect/settings sections before clearing local records, restores explicit reminder suppressions, and rejects suppressions with no matching task. A malformed optional section is tested to leave existing local records intact.
+- Added a representative v14 → v17 upgrade test proving an existing Task and sync outbox record survive while Day Architect defaults/tables are created. Capacity overload now includes configured transition time.
+- `/Users/rioo/flutter/bin/flutter analyze --no-pub`: passed with no issues.
+- `/Users/rioo/flutter/bin/flutter test --no-pub`: passed all 125 tests. The existing large-text onboarding tap warning is still emitted; it does not fail the suite.
+- `sh tool/flutter_android.sh build appbundle --release --no-pub`: passed; produced `build/app/outputs/bundle/release/app-release.aab` (57.1 MB). Gradle emitted an SDK XML tooling-version warning, but compilation completed.
+- `/Users/rioo/flutter/bin/flutter build ios --simulator --debug --no-pub --no-codesign`: passed; produced `build/ios/iphonesimulator/Runner.app`.
+- Still external: deployed Supabase migrations/RLS behavior, live AIMLAPI output, actual two-device cloud exchange, physical-device notifications/timezone behavior, and production signing/store distribution.
+
+## Final Day Architect hardening — 28 September 2026
+
+- Schedule proposals generated from app context now carry deterministic, date-scoped base fingerprints. Approval recomputes them inside the SQLite transaction, rejects stale Planner/task/recurrence state before any write, and presents a native regenerate/cancel explanation. Unrelated records outside the planning context do not invalidate the proposal.
+- Backup replacement now executes as one SQLite transaction, including relationships, Planner blocks, Focus/routines, reminders and suppressions, recurring schedules/exceptions, and settings. An injected failure after deletion and several inserts proves domain rows and trigger-generated outbox changes roll back to the original workspace. Notification reconciliation remains after a successful model change, so a failed database restore does not first cancel the original OS schedule.
+- Added historical v15 and v16 fixtures using their actual older Day Architect table shapes. Both upgrade to v17 while preserving core records, recurrence data, preferences, foreign keys, sync state/outbox, and one set of sync triggers.
+- Planning-preference sync now persists the fields changed locally, uploads patches, preserves pending local fields when remote state arrives, and merges preference JSON in the checked Supabase RPC. Independent edits converge; same-field conflicts use deterministic last-server-arrival-wins.
+- The large-text onboarding warning represented an off-screen test hit target at 200% scaling. The test now centers the actual scroll target before tapping; all onboarding tests pass without warning suppression.
+- Code-level timezone audit replaced 24-hour `Duration(days: …)` arithmetic with local calendar constructors for recurring/day/week/calendar iteration. Recurring wall-clock values remain date-only/time-only strings. Physical DST and travel-zone behavior is still external validation.
+- `/Users/rioo/flutter/bin/flutter analyze --no-pub`: passed with no issues.
+- `/Users/rioo/flutter/bin/flutter test --no-pub`: passed all 133 tests without the previous onboarding hit-test warning.
+- `git diff --check`: passed.
+- `sh tool/flutter_android.sh build appbundle --release --no-pub`: passed; produced `build/app/outputs/bundle/release/app-release.aab` (57.2 MB). The existing non-fatal SDK XML tooling-version warning remains.
+- `/Users/rioo/flutter/bin/flutter build ios --simulator --debug --no-pub --no-codesign`: passed; produced `build/ios/iphonesimulator/Runner.app`.
+- Still external: deployed Supabase migrations/RLS, live AIMLAPI responses, real two-device Supabase exchange, physical Android/iPhone notification and timezone/DST behavior, and production signing/store distribution.
+
+## Plan My Week — 28 September 2026
+
+- Weekly context tests cover Monday normalization, a September/October boundary, compact shared task data, planned dates, temporary user constraints, seven fingerprints, recurring exceptions, and capacity data.
+- Native proposal widget coverage verifies a seven-day grouped review, open-day states, editable cards, selection controls, and no raw JSON.
+- Repository coverage verifies a transactional cross-day move, two split sessions linked to one stable Task, seven-date stale protection, idempotent normal persistence, and rejection of work scheduled after its deadline. Existing partial-acceptance, overlap, fixed-block, sleep/cutoff, capacity, stale and rollback tests remain active.
+- `/Users/rioo/flutter/bin/flutter analyze`: passed with no issues.
+- `/Users/rioo/flutter/bin/flutter test`: passed all 137 tests.
+- `git diff --check`: passed.
+- `sh tool/flutter_android.sh build appbundle --release`: passed; produced `build/app/outputs/bundle/release/app-release.aab` (57.3 MB). The existing non-fatal SDK XML tooling-version warning remains.
+- `/Users/rioo/flutter/bin/flutter build ios --simulator`: passed; produced `build/ios/iphonesimulator/Runner.app`.
+- Still external: live AIMLAPI weekly output quality, deployed Supabase migrations/RLS and real two-device exchange, physical-device notifications/timezone/DST/accessibility, and production signing/store submission.
 
 
 ## First capture slice — 7 September 2026

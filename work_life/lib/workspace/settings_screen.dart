@@ -4,15 +4,20 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../ai/aimlapi_client.dart';
+import '../sync/sync_models.dart';
+import '../sync/workspace_sync_coordinator.dart';
 import 'records.dart';
 import 'onboarding_screen.dart';
 import 'reminder_defaults.dart';
 import 'workspace_model.dart';
+import 'day_architect_settings.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key, required this.model, this.share});
+  const SettingsScreen({super.key, required this.model, this.share, this.sync});
   final WorkspaceModel model;
   final Future<ShareResult> Function(ShareParams)? share;
+  final WorkspaceSyncCoordinator? sync;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -108,6 +113,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Future<void> _import() async {
+    final controller = TextEditingController();
+    final json = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restore a backup'),
+        content: TextField(
+          controller: controller,
+          maxLines: 8,
+          decoration: const InputDecoration(
+            hintText: 'Paste a Work Life JSON export',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Validate and restore'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (json == null || json.trim().isEmpty || !mounted) return;
+    final ok = await widget.model.importLocalData(json);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Backup restored.'
+              : (widget.model.error ?? 'Could not restore backup.'),
+        ),
+      ),
+    );
+  }
+
   Future<void> _pick(bool start) async {
     final quiet = widget.model.data.quietHours;
     final minute = start ? quiet.startMinute : quiet.endMinute;
@@ -129,7 +174,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: widget.model,
+    listenable: Listenable.merge([
+      widget.model,
+      if (widget.sync != null) widget.sync!,
+    ]),
     builder: (context, _) {
       final quiet = widget.model.data.quietHours;
       return Scaffold(
@@ -141,6 +189,92 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               if (widget.model.busy || _exporting)
                 const LinearProgressIndicator(),
+              if (widget.sync case final sync?) ...[
+                Text(
+                  'Cloud synchronization',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 8),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(switch (sync.status.phase) {
+                    SyncPhase.syncing => Icons.sync,
+                    SyncPhase.synced => Icons.cloud_done_outlined,
+                    SyncPhase.offline => Icons.cloud_off_outlined,
+                    SyncPhase.problem => Icons.error_outline,
+                    SyncPhase.idle => Icons.cloud_queue_outlined,
+                  }),
+                  title: Text(switch (sync.status.phase) {
+                    SyncPhase.syncing => 'Syncing…',
+                    SyncPhase.synced => 'Synced',
+                    SyncPhase.offline => 'Offline — changes saved here',
+                    SyncPhase.problem => 'Sync problem',
+                    SyncPhase.idle => 'Ready to sync',
+                  }),
+                  subtitle: Text(
+                    sync.status.message ??
+                        (sync.status.pending == 0
+                            ? 'Your signed-in workspace is up to date.'
+                            : '${sync.status.pending} changes waiting to sync.'),
+                  ),
+                  trailing: sync.status.phase == SyncPhase.syncing
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : IconButton(
+                          tooltip: 'Retry synchronization',
+                          onPressed: () async {
+                            await sync.retryNow();
+                            await widget.model.load();
+                          },
+                          icon: const Icon(Icons.refresh),
+                        ),
+                ),
+                const SizedBox(height: 24),
+              ],
+              Text(
+                'AI assistance',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  AimlApiClient.environmentConfigured
+                      ? Icons.auto_awesome
+                      : Icons.cloud_off_outlined,
+                ),
+                title: Text(
+                  AimlApiClient.environmentConfigured
+                      ? 'AI assistance is available'
+                      : 'AI assistance is not enabled',
+                ),
+                subtitle: const Text(
+                  'Tasks, projects, Planner, Focus, routines, reminders, and Calendar continue to work without AI.',
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Day Architect',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_repeat),
+                title: const Text('Schedules and planning preferences'),
+                subtitle: Text(
+                  '${widget.model.data.recurringSchedules.length} recurring commitments · ${widget.model.data.planningPreferences.style} plan',
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => DayArchitectSettings(model: widget.model),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
               Text(
                 'Notifications',
                 style: Theme.of(context).textTheme.headlineSmall,
@@ -233,6 +367,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 subtitle: const Text('Share a versioned JSON export'),
                 enabled: !widget.model.busy && !_exporting,
                 onTap: _export,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.restore_outlined),
+                title: const Text('Restore a backup'),
+                subtitle: const Text('Paste a versioned JSON export'),
+                enabled: !widget.model.busy && !_exporting,
+                onTap: _import,
               ),
               ListTile(
                 contentPadding: EdgeInsets.zero,

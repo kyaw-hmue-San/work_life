@@ -33,4 +33,8 @@ TaskReminder snoozedReminder(
   id: reminder.id,
   taskId: reminder.taskId,
   scheduledAt: snoozeTime(option, now ?? DateTime.now()).toUtc(),
+  deliveryStatus: 'pending',
+  origin: reminder.origin,
+  basis: reminder.basis,
+  recurrence: reminder.recurrence,
 );

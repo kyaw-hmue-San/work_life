@@ -10,6 +10,34 @@ import 'support/memory_workspace.dart';
 import 'support/fake_notifications.dart';
 
 void main() {
+  testWidgets('tapping outside an editor dismisses the keyboard app-wide', (
+    tester,
+  ) async {
+    final focus = FocusNode();
+    addTearDown(focus.dispose);
+    await tester.pumpWidget(
+      WorkLifeApp(
+        repository: MemoryWorkspace(),
+        homeOverride: Scaffold(
+          body: Column(
+            children: [
+              TextField(key: const Key('editor'), focusNode: focus),
+              const Expanded(
+                child: ColoredBox(key: Key('outside'), color: Colors.white),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const Key('editor')));
+    await tester.pump();
+    expect(focus.hasFocus, isTrue);
+    await tester.tapAt(const Offset(20, 200));
+    await tester.pump();
+    expect(focus.hasFocus, isFalse);
+  });
+
   testWidgets(
     'Today explains denied notification permission and retries after enabling',
     (tester) async {
@@ -29,20 +57,13 @@ void main() {
         ),
       );
       final driver = FakeNotifications()
-        ..state = NotificationPermission.blocked;
+        ..state = NotificationPermission.notDetermined
+        ..stateAfterRequest = NotificationPermission.allowed;
       final notifications = ReminderNotifications(driver);
       await tester.pumpWidget(
         WorkLifeApp(repository: repo, notifications: notifications),
       );
       await tester.pumpAndSettle();
-      expect(
-        find.textContaining('Device notifications are off'),
-        findsOneWidget,
-      );
-      expect(driver.permissionRequests, 0);
-      driver.state = NotificationPermission.allowed;
-      await tester.ensureVisible(find.text('Enable notifications'));
-      await tester.tap(find.text('Enable notifications'));
       await tester.pumpAndSettle();
       expect(driver.permissionRequests, 1);
       expect(driver.alerts, hasLength(1));

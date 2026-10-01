@@ -3,8 +3,15 @@ import 'package:flutter/material.dart';
 import 'account_service.dart';
 
 class AccountScreen extends StatefulWidget {
-  const AccountScreen({super.key, required this.accounts});
+  const AccountScreen({
+    super.key,
+    required this.accounts,
+    this.startup = false,
+    this.onContinueOffline,
+  });
   final AccountService accounts;
+  final bool startup;
+  final VoidCallback? onContinueOffline;
   @override
   State<AccountScreen> createState() => _AccountScreenState();
 }
@@ -95,8 +102,14 @@ class _AccountScreenState extends State<AccountScreen> {
         canPop: !busy && !recovery,
         child: Scaffold(
           appBar: AppBar(
-            title: Text(recovery ? 'Choose a new password' : 'Account'),
-            automaticallyImplyLeading: !recovery,
+            title: Text(
+              recovery
+                  ? 'Choose a new password'
+                  : widget.startup
+                  ? 'Welcome to Work Life'
+                  : 'Account',
+            ),
+            automaticallyImplyLeading: !recovery && !widget.startup,
           ),
           body: SafeArea(
             child: Align(
@@ -121,6 +134,8 @@ class _AccountScreenState extends State<AccountScreen> {
                             ? 'A fresh start for your sign-in.'
                             : signedIn
                             ? 'Your space, your account.'
+                            : widget.startup
+                            ? 'Sign in to your real account.'
                             : 'Make a space of your own.',
                         style: Theme.of(context).textTheme.headlineMedium,
                       ),
@@ -360,6 +375,28 @@ class _AccountScreenState extends State<AccountScreen> {
                             child: Text(message!),
                           ),
                         ),
+                      if (!recovery &&
+                          !signedIn &&
+                          service.configured &&
+                          widget.onContinueOffline != null) ...[
+                        const SizedBox(height: 28),
+                        const Divider(),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: busy ? null : widget.onContinueOffline,
+                          icon: const Icon(Icons.offline_bolt_outlined),
+                          label: const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Text('Use offline guest workspace'),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Guest mode is optional and stays separate from your account. Nothing is uploaded or deleted.',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
                     ],
                   ),
                 ),

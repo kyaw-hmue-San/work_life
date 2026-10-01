@@ -21,6 +21,7 @@ class ReminderEditor extends StatefulWidget {
 
 class _ReminderEditorState extends State<ReminderEditor> {
   late DateTime selected;
+  ReminderRecurrence recurrence = ReminderRecurrence.none;
   bool saving = false;
   String? error;
 
@@ -31,22 +32,28 @@ class _ReminderEditorState extends State<ReminderEditor> {
         .reminderFor(widget.taskId)
         ?.scheduledAt
         .toLocal();
+    recurrence =
+        widget.model.reminderFor(widget.taskId)?.recurrence ??
+        ReminderRecurrence.none;
     final now = DateTime.now();
-    final planned = widget.model.data.plans
-      .where((plan) => plan.taskId == widget.taskId && plan.start.isAfter(now))
-      .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
+    final planned =
+        widget.model.data.plans
+            .where(
+              (plan) => plan.taskId == widget.taskId && plan.start.isAfter(now),
+            )
+            .toList()
+          ..sort((a, b) => a.start.compareTo(b.start));
     final defaultTime = planned.isEmpty
-      ? null
-      : defaultReminderTime(
-        widget.model.data.reminderDefault,
-        planned.first.start,
-        )?.toLocal();
+        ? null
+        : defaultReminderTime(
+            widget.model.data.reminderDefault,
+            planned.first.start,
+          )?.toLocal();
     final initial = existing != null && existing.isAfter(now)
-      ? existing
-      : defaultTime != null && defaultTime.isAfter(now)
-      ? defaultTime
-      : now.add(const Duration(hours: 1));
+        ? existing
+        : defaultTime != null && defaultTime.isAfter(now)
+        ? defaultTime
+        : now.add(const Duration(hours: 1));
     selected = DateTime(
       initial.year,
       initial.month,
@@ -71,6 +78,7 @@ class _ReminderEditorState extends State<ReminderEditor> {
           id: widget.model.reminderFor(widget.taskId)?.id ?? newId(),
           taskId: widget.taskId,
           scheduledAt: selected.toUtc(),
+          recurrence: recurrence,
         ),
       ),
     );
@@ -149,6 +157,37 @@ class _ReminderEditorState extends State<ReminderEditor> {
                   },
             child: const Text('Choose time'),
           ),
+          DropdownButtonFormField<ReminderRecurrence>(
+            initialValue: recurrence,
+            decoration: const InputDecoration(labelText: 'Repeat'),
+            items: const [
+              DropdownMenuItem(
+                value: ReminderRecurrence.none,
+                child: Text('Once'),
+              ),
+              DropdownMenuItem(
+                value: ReminderRecurrence.daily,
+                child: Text('Every day'),
+              ),
+              DropdownMenuItem(
+                value: ReminderRecurrence.weekly,
+                child: Text('Every week'),
+              ),
+            ],
+            onChanged: saving
+                ? null
+                : (value) {
+                    if (value != null) setState(() => recurrence = value);
+                  },
+          ),
+          if (recurrence == ReminderRecurrence.weekly)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'This repeats on ${MaterialLocalizations.of(context).formatFullDate(selected)} each week.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
           if (error != null)
             Text(
               error!,

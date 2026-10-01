@@ -8,6 +8,9 @@ import 'focus_screen.dart';
 import 'records.dart';
 import 'reminder_editor.dart';
 import 'workspace_model.dart';
+import '../ai/aimlapi_client.dart';
+import '../ai/ai_proposal_screen.dart';
+import '../ai/ai_proposals.dart';
 
 class TaskDetail extends StatelessWidget {
   const TaskDetail({super.key, required this.model, required this.taskId});
@@ -30,11 +33,97 @@ class TaskDetail extends StatelessWidget {
       Future<void> snooze(SnoozeOption option) async {
         if (reminder == null) return;
         await model.change(
-          () => model.repository.saveReminder(
-            snoozedReminder(reminder, option),
-          ),
+          () =>
+              model.repository.saveReminder(snoozedReminder(reminder, option)),
         );
       }
+
+      Future<void> startFocus(int minutes) async {
+        final active = model.activeSession;
+        if (active == null) {
+          final now = DateTime.now().toUtc();
+          final ok = await model.change(
+            () => model.repository.saveSession(
+              FocusSession(
+                id: newId(),
+                taskId: task.id,
+                minutes: minutes,
+                startedAt: now,
+                runningSince: now,
+              ),
+            ),
+          );
+          if (!ok || !context.mounted) return;
+        }
+        if (context.mounted) {
+          Navigator.push(
+            context,
+            MaterialPageRoute<void>(builder: (_) => FocusScreen(model: model)),
+          );
+        }
+      }
+
+      Future<void> breakDown() async {
+        Future<AiProjectProposal> request() async {
+          final requestClient = AimlApiClient();
+          try {
+            return await requestClient.breakdown(
+              'Break this existing task into practical next actions. Title: ${task.title}. Notes: ${task.notes}. Area: ${task.area}. Deadline: ${task.deadline ?? 'none'}.',
+            );
+          } finally {
+            requestClient.dispose();
+          }
+        }
+
+        final client = AimlApiClient();
+        if (!client.configured) {
+          client.dispose();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('AI task breakdown is not enabled in this build.'),
+            ),
+          );
+          return;
+        }
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => const AlertDialog(
+            title: Text('Breaking down this task…'),
+            content: LinearProgressIndicator(),
+          ),
+        );
+        try {
+          final proposal = await request();
+          if (!context.mounted) return;
+          Navigator.pop(context);
+          await Navigator.push<bool>(
+            context,
+            MaterialPageRoute<bool>(
+              builder: (_) => AiProjectProposalScreen(
+                model: model,
+                proposal: proposal,
+                targetProjectId: task.projectId,
+                onRegenerate: request,
+              ),
+            ),
+          );
+        } catch (error) {
+          if (context.mounted) {
+            Navigator.pop(context);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  error is AiServiceException ? error.message : 'AI returned a breakdown this app could not read. Try again.',
+                ),
+              ),
+            );
+          }
+        } finally {
+          client.dispose();
+        }
+      }
+
       return Scaffold(
         appBar: AppBar(
           title: const Text('Task details'),
@@ -72,7 +161,7 @@ class TaskDetail extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               Text(
-                '${task.active ? (task.status == TaskStatus.inProgress ? 'In progress' : 'Open') : task.status.name} · ${task.minutes} min estimated',
+                '${task.active ? (task.status == TaskStatus.inProgress ? 'In progress' : 'Open') : task.status.name} · ${task.priority.name} priority · ${task.minutes} min estimated',
               ),
               if (projects.isNotEmpty)
                 Padding(
@@ -229,33 +318,49 @@ class TaskDetail extends StatelessWidget {
               ],
               const SizedBox(height: 24),
               if (task.active) ...[
+                OutlinedButton.icon(
+                  onPressed: model.busy ? null : breakDown,
+                  icon: const Icon(Icons.account_tree_outlined),
+                  label: const Text('Break this task down with AI'),
+                ),
+                const SizedBox(height: 8),
                 FilledButton.icon(
                   onPressed: model.busy
                       ? null
                       : () async {
-                          final active = model.activeSession;
-                          if (active == null) {
-                            final now = DateTime.now().toUtc();
-                            final ok = await model.change(
-                              () => model.repository.saveSession(
-                                FocusSession(
-                                  id: newId(),
-                                  taskId: task.id,
-                                  minutes: task.minutes,
-                                  startedAt: now,
-                                  runningSince: now,
-                                ),
-                              ),
-                            );
-                            if (!ok || !context.mounted) return;
+                          if (model.activeSession != null) {
+                            await startFocus(task.minutes);
+                            return;
                           }
-                          if (context.mounted) {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute<void>(
-                                builder: (_) => FocusScreen(model: model),
+                          final minutes = await showModalBottomSheet<int>(
+                            context: context,
+                            builder: (sheetContext) => SafeArea(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const ListTile(
+                                    title: Text('Choose a focus preset'),
+                                  ),
+                                  for (final value in {
+                                    15,
+                                    25,
+                                    50,
+                                    task.minutes,
+                                  })
+                                    ListTile(
+                                      leading: const Icon(Icons.timelapse),
+                                      title: Text(
+                                        '$value minutes${value == task.minutes ? ' · task default' : ''}',
+                                      ),
+                                      onTap: () =>
+                                          Navigator.pop(sheetContext, value),
+                                    ),
+                                ],
                               ),
-                            );
+                            ),
+                          );
+                          if (minutes != null && context.mounted) {
+                            await startFocus(minutes);
                           }
                         },
                   icon: const Icon(Icons.play_arrow),

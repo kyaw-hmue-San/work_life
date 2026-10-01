@@ -42,6 +42,9 @@ dependencies:
   timezone: ^0.11.1
   crypto: ^3.0.7
   share_plus: ^13.3.0
+  http: ^1.5.0
+  image_picker: ^1.1.2
+  shared_preferences: ^2.5.5
 dev_dependencies:
   flutter_test:
     sdk: flutter

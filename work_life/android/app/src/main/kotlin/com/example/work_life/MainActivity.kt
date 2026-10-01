@@ -1,4 +1,4 @@
-package com.example.work_life
+package com.worklife.app
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -18,6 +18,7 @@ class RecordEditor extends StatefulWidget {
     this.capture,
     this.projectId,
     this.day,
+    this.routineTemplate = false,
   });
   final WorkspaceModel model;
   final String kind;
@@ -29,6 +30,7 @@ class RecordEditor extends StatefulWidget {
   final Capture? capture;
   final String? projectId;
   final DateTime? day;
+  final bool routineTemplate;
   @override
   State<RecordEditor> createState() => _RecordEditorState();
 }
@@ -46,6 +48,7 @@ class _RecordEditorState extends State<RecordEditor> {
   late String area;
   String? projectId, taskId, deadline, relatedId;
   String entryKind = 'note';
+  late TaskPriority priority;
   late DateTime start;
   bool fixed = false, saving = false;
   String? error;
@@ -70,7 +73,7 @@ class _RecordEditorState extends State<RecordEditor> {
           widget.entry?.title ??
           widget.sourceEntry?.title ??
           widget.capture?.originalText.trim() ??
-          '',
+          (widget.routineTemplate ? 'Exercise' : ''),
     );
     notes = TextEditingController(
       text:
@@ -85,10 +88,24 @@ class _RecordEditorState extends State<RecordEditor> {
     checklist = TextEditingController(
       text: t?.checklist.map((c) => c.text).join('\n') ?? '',
     );
-    window = TextEditingController(text: r?.window ?? '');
-    alternative = TextEditingController(text: r?.alternative ?? '');
-    normal = TextEditingController(text: r?.normal ?? '');
-    strong = TextEditingController(text: r?.strong ?? '');
+    window = TextEditingController(
+      text: r?.window ?? (widget.routineTemplate ? 'Any time' : ''),
+    );
+    alternative = TextEditingController(
+      text:
+          r?.alternative ??
+          (widget.routineTemplate ? 'Stretch or walk for 5 minutes' : ''),
+    );
+    normal = TextEditingController(
+      text: r?.normal ?? (widget.routineTemplate ? 'Move for 20 minutes' : ''),
+    );
+    strong = TextEditingController(
+      text:
+          r?.strong ??
+          (widget.routineTemplate
+              ? 'Complete a full workout for 45 minutes'
+              : ''),
+    );
     projectId =
         t?.projectId ??
         widget.entry?.projectId ??
@@ -103,6 +120,7 @@ class _RecordEditorState extends State<RecordEditor> {
         (projects.isEmpty ? 'Work' : projects.first.area);
     taskId = b?.taskId;
     deadline = t?.deadline;
+    priority = t?.priority ?? TaskPriority.medium;
     final day = widget.day ?? DateTime.now();
     start = b?.start ?? DateTime(day.year, day.month, day.day, 9);
     fixed = b?.fixed ?? false;
@@ -172,6 +190,7 @@ class _RecordEditorState extends State<RecordEditor> {
           deadline: deadline,
           minutes: int.parse(minutes.text),
           notes: notes.text,
+          priority: priority,
           checklist: steps,
           status: widget.task?.status ?? TaskStatus.open,
         );
@@ -423,6 +442,26 @@ class _RecordEditorState extends State<RecordEditor> {
                       ),
                     ],
                     if (isTask) ...[
+                      SegmentedButton<TaskPriority>(
+                        segments: const [
+                          ButtonSegment(
+                            value: TaskPriority.low,
+                            label: Text('Low'),
+                          ),
+                          ButtonSegment(
+                            value: TaskPriority.medium,
+                            label: Text('Medium'),
+                          ),
+                          ButtonSegment(
+                            value: TaskPriority.high,
+                            label: Text('High'),
+                          ),
+                        ],
+                        selected: {priority},
+                        onSelectionChanged: (value) =>
+                            setState(() => priority = value.single),
+                      ),
+                      const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
                         initialValue: projectId ?? '',
                         isExpanded: true,

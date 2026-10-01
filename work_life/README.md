@@ -8,7 +8,7 @@ Export and Delete Local Data (9 September 2026): implemented for the current wor
 
 Flutter workspace for a mobile app that helps people capture ideas, keep commitments, plan realistically, focus, and protect health, relationships, and rest. Product name is undecided. The owner chose Flutter for Android and iPhone, with learning as a project goal.
 
-Status: connected local app with Today, Inbox, Projects, Planner, Focus, daily routines, basic life-area reflection, Quiet Hours, Reminder Defaults, and an optional Supabase account slice. Captures, tasks, plans, reminders, and settings are saved in SQLite. Native device notifications are implemented and automated-tested, but still need physical-device acceptance; cloud sync and AI remain future backlog work. See [Implementation guide](docs/IMPLEMENTATION.md) and [Supabase/Google setup](docs/SUPABASE_GOOGLE_SETUP.md).
+Status: connected offline-first app with Today, Inbox, Projects, Planner, Focus, routines, weekly review, exercise progress, reminders, backup restore, schedule-image import and native AI proposals. SQLite remains the working database. Signed-in workspaces use durable, incremental Supabase synchronization with tombstones, retries and account ownership; guest mode stays local. Apply the included Supabase migration before multi-device testing. Production AI uses an authenticated Edge Function. Native notifications and cloud sync are automated-tested but still need live deployment and physical-device acceptance.
 
 ## Read in this order
 
@@ -38,14 +38,34 @@ The SDK is at `/Users/rioo/flutter`; `flutter` and `dart` may not be on the shel
 /Users/rioo/flutter/bin/flutter test --no-pub
 ```
 
-Analysis found no issues and all 77 tests passed. Android build tools are now installed under `.tooling/`; see [Android setup](docs/ANDROID_SETUP.md). No Android or iPhone device or emulator was available during this review, and current native builds and phone behavior remain unverified. See [Validation](docs/VALIDATION.md) for product acceptance checks.
+Android build tools are installed under `.tooling/`; see [Android setup](docs/ANDROID_SETUP.md). Automated checks do not prove notification delivery, OAuth callbacks, image picking, or sharing on a real phone. See [Validation](docs/VALIDATION.md) for product acceptance checks.
 
 
 ## Run the app
 
+Create your private environment file once:
+
 ```sh
-/Users/rioo/flutter/bin/flutter pub get
-/Users/rioo/flutter/bin/flutter run
+cd /Users/rioo/projects/work_life/work_life
+test -f config/.env || cp config/.env.example config/.env
 ```
 
-Select an Android device/emulator or iOS simulator/device. The app saves captures locally. With the Supabase defines, email and Google account sign-in are available, but cloud backup and syncing are not connected yet. The generated web/Windows/Linux scaffolds are not supported by the current storage setup. Physical iPhone signing still needs configuration. See [Supabase/Google setup](docs/SUPABASE_GOOGLE_SETUP.md) before testing real sign-in.
+Add your Supabase project URL, publishable key, and deployed AI proxy URL to `config/.env`. Keep `AIMLAPI_KEY` only as an explicitly enabled local-debug option. Do not add a Supabase secret/service-role key. Then list devices and run:
+
+```sh
+/Users/rioo/flutter/bin/flutter devices
+sh tool/run_with_env.sh -d DEVICE_ID
+```
+
+The configured build opens on real-account sign-in. A new account gets onboarding automatically. For an existing account, open **More → Run onboarding again**; this replays setup without deleting records. Offline guest mode is available only from the secondary button on the sign-in screen.
+
+Run automated checks with:
+
+```sh
+/Users/rioo/flutter/bin/flutter analyze --no-pub
+/Users/rioo/flutter/bin/flutter test --no-pub
+```
+
+For Android device setup, APK builds, and notification acceptance, use [Android setup](docs/ANDROID_SETUP.md). For email/Google provider and callback setup, use [Supabase/Google setup](docs/SUPABASE_GOOGLE_SETUP.md). The generated web/Windows/Linux scaffolds are not supported by the current storage implementation. Physical iPhone signing still requires your Apple development team.
+
+Production AI calls use the authenticated Supabase Edge Function in `supabase/functions/ai-proxy`; provider credentials remain server-side. Direct AIMLAPI access is disabled in release builds even if a key is accidentally supplied. Deploy the function and set its `AIMLAPI_KEY` secret before production validation.

@@ -52,9 +52,13 @@ class AccountConfig {
       uri.host == 'auth-callback' &&
       (uri.path.isEmpty || uri.path == '/') &&
       uri.userInfo.isEmpty &&
-      !uri.hasPort && !uri.hasFragment &&
-      ((uri.queryParameters['code']?.isNotEmpty ?? false) || uri.queryParameters.containsKey('error') || uri.queryParameters.containsKey('error_description')) &&
-      !uri.queryParameters.containsKey('access_token') && !uri.queryParameters.containsKey('refresh_token');
+      !uri.hasPort &&
+      !uri.hasFragment &&
+      ((uri.queryParameters['code']?.isNotEmpty ?? false) ||
+          uri.queryParameters.containsKey('error') ||
+          uri.queryParameters.containsKey('error_description')) &&
+      !uri.queryParameters.containsKey('access_token') &&
+      !uri.queryParameters.containsKey('refresh_token');
 }
 
 String accountDatabaseName(String namespace, String? userId) {

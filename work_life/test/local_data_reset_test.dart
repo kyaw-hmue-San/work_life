@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:work_life/notifications/reminder_notifications.dart';
 import 'package:work_life/workspace/local_data_export.dart';
+import 'package:work_life/workspace/local_data_import.dart';
 import 'package:work_life/workspace/records.dart';
 import 'package:work_life/workspace/workspace_model.dart';
 import 'package:work_life/workspace/workspace_repository.dart';
@@ -32,6 +33,29 @@ void main() {
 
   test('all persisted categories export and reset, survive reopen, and allow reuse', () async {
     await populateWorkspace(repo);
+    await repo.saveRecurringSchedule(
+      const RecurringSchedule(
+        id: 'class',
+        title: 'Software Engineering',
+        type: RecurringScheduleType.classSession,
+        weekday: 1,
+        startTime: '09:00',
+        endTime: '10:30',
+        startDate: '2035-01-01',
+        endDate: '2035-05-31',
+      ),
+    );
+    await repo.saveScheduleException(
+      const ScheduleException(
+        scheduleId: 'class',
+        day: '2035-01-08',
+        cancelled: false,
+        movedToDate: '2035-01-09',
+      ),
+    );
+    await repo.savePlanningPreferences(
+      const PlanningPreferences(wakeTime: '07:00', style: 'productive'),
+    );
     final exporter = LocalDataExport(repo, now: () => DateTime.utc(2030));
     final json = await exporter.buildJson();
     expect(await exporter.buildJson(), json);
@@ -67,6 +91,8 @@ void main() {
       'taskId',
       'scheduledAt',
       'origin',
+      'basis',
+      'recurrence',
     });
     expect(data.keys.toSet(), {
       'captures',
@@ -76,12 +102,33 @@ void main() {
       'planner',
       'focusSessions',
       'routines',
+      'recurringSchedules',
+      'scheduleExceptions',
       'routineRecords',
       'lifeAreas',
       'reminders',
       'reminderSuppressions',
       'settings',
     });
+    await repo.clearLocalData();
+    await LocalDataImport(repo).restore(json);
+    final restored = await repo.readWorkspace();
+    expect(
+      restored.tasks.map((task) => task.id),
+      containsAll(['task', 'suppressed']),
+    );
+    expect(restored.projects.single.id, 'project');
+    expect(restored.entries, hasLength(2));
+    expect(restored.routines.single.id, 'routine');
+    expect(restored.recurringSchedules.single.title, 'Software Engineering');
+    expect(restored.scheduleExceptions.single.day, '2035-01-08');
+    expect(restored.scheduleExceptions.single.movedToDate, '2035-01-09');
+    expect(restored.planningPreferences.wakeTime, '07:00');
+    expect(restored.sessions.single.id, 'session');
+    expect(restored.reminders.single.recurrence, ReminderRecurrence.none);
+    expect(restored.suppressedTaskIds, contains('suppressed'));
+    expect(restored.quietHours.enabled, isTrue);
+    expect(restored.reminderDefault, ReminderDefault.thirtyMinutesBefore);
     for (final forbidden in [
       'deliveryStatus',
       'delivery_status',
@@ -126,6 +173,19 @@ void main() {
     expect(reset['settings'], {
       'quietHours': {'enabled': false, 'startMinute': 1380, 'endMinute': 420},
       'reminderDefault': 'none',
+      'planningPreferences': {
+        'wakeTime': '07:30',
+        'bedTime': '23:00',
+        'transitionMinutes': 15,
+        'breakMinutes': 15,
+        'exercisePeriod': 'flexible',
+        'avoidFocusAfter': '21:30',
+        'maxFocusMinutes': 90,
+        'style': 'balanced',
+        'breakfastWindow': '07:00-09:00',
+        'lunchWindow': '12:00-14:00',
+        'dinnerWindow': '18:00-20:00',
+      },
     });
     await model.refreshNotifications();
     expect(driver.alerts, isEmpty);
@@ -137,6 +197,66 @@ void main() {
     await service.idle;
     service.dispose();
   });
+
+  test(
+    'malformed optional backup data does not clear existing records',
+    () async {
+      await populateWorkspace(repo);
+      final before = await LocalDataExport(repo).buildJson();
+      final decoded = jsonDecode(before) as Map<String, dynamic>;
+      final data = decoded['data'] as Map<String, dynamic>;
+      data['recurringSchedules'] = [
+        {
+          'id': 'bad',
+          'title': 'Bad schedule',
+          'type': 'not_a_real_type',
+          'weekday': 1,
+          'startTime': '09:00',
+          'endTime': '10:00',
+          'startDate': '2030-01-01',
+        },
+      ];
+
+      await expectLater(
+        LocalDataImport(repo).restore(jsonEncode(decoded)),
+        throwsA(anything),
+      );
+      final after = await repo.readWorkspace();
+      expect(
+        after.tasks.map((task) => task.id),
+        containsAll(['task', 'suppressed']),
+      );
+      expect(after.projects.single.id, 'project');
+    },
+  );
+
+  test(
+    'database failure halfway through restore rolls back every row',
+    () async {
+      await populateWorkspace(repo);
+      final exporter = LocalDataExport(repo, now: () => DateTime.utc(2030));
+      final before = await exporter.buildJson();
+      final replacement = jsonDecode(before) as Map<String, dynamic>;
+      final replacementData = replacement['data'] as Map<String, dynamic>;
+      (replacementData['tasks'] as List).first['title'] = 'Replacement title';
+
+      final db = await repo.database.open();
+      await db.execute(
+        "CREATE TRIGGER fail_restore BEFORE INSERT ON plans BEGIN SELECT RAISE(ABORT, 'injected restore failure'); END",
+      );
+      await expectLater(
+        LocalDataImport(repo).restore(jsonEncode(replacement)),
+        throwsA(isA<DatabaseException>()),
+      );
+      expect(await exporter.buildJson(), before);
+      expect(
+        (await repo.readWorkspace()).tasks.any(
+          (task) => task.title == 'Replacement title',
+        ),
+        isFalse,
+      );
+    },
+  );
 
   test('SQL failure rolls all categories and settings back', () async {
     await populateWorkspace(repo);

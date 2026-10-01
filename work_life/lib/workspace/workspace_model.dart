@@ -1,15 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../notifications/reminder_notifications.dart';
 
 import 'records.dart';
 import 'local_data_export.dart';
+import 'local_data_import.dart';
 import 'workspace_repository.dart';
 
 class WorkspaceModel extends ChangeNotifier {
   WorkspaceModel(
     this.repository, {
     this.notifications,
+    this.afterChange,
     String notificationScope = 'guest',
   }) {
     _notificationLease = notifications?.attach(notificationScope);
@@ -17,11 +21,13 @@ class WorkspaceModel extends ChangeNotifier {
   }
   final WorkspaceRepository repository;
   final ReminderNotifications? notifications;
+  final Future<void> Function()? afterChange;
   int? _notificationLease;
   bool _refreshingNotifications = false;
   WorkspaceData data = const WorkspaceData();
   bool loading = true, busy = false;
   String? error;
+  Object? lastFailure;
   bool _disposed = false;
   int resetRevision = 0;
   void _changed() {
@@ -31,8 +37,11 @@ class WorkspaceModel extends ChangeNotifier {
   Future<void> load() async {
     loading = true;
     error = null;
+    lastFailure = null;
     _changed();
     try {
+      data = await repository.readWorkspace();
+      await _advanceRecurringReminders();
       data = await repository.readWorkspace();
       await _syncNotifications();
     } catch (_) {
@@ -47,13 +56,19 @@ class WorkspaceModel extends ChangeNotifier {
     if (busy || loading) return false;
     busy = true;
     error = null;
+    lastFailure = null;
     _changed();
     try {
       await operation();
       data = await repository.readWorkspace();
       await _syncNotifications();
+      final callback = afterChange;
+      if (callback != null) {
+        unawaited(Future<void>.delayed(Duration.zero, callback));
+      }
       return true;
-    } catch (_) {
+    } catch (failure) {
+      lastFailure = failure;
       error = 'Couldn’t finish that change. Your saved records are kept. Please retry.';
       return false;
     } finally {
@@ -85,10 +100,39 @@ class WorkspaceModel extends ChangeNotifier {
     }
   }
 
+  Future<void> _advanceRecurringReminders() async {
+    final now = DateTime.now().toUtc();
+    for (final reminder in data.reminders) {
+      if (reminder.recurrence == ReminderRecurrence.none ||
+          reminder.scheduledAt.isAfter(now)) {
+        continue;
+      }
+      var next = reminder.scheduledAt;
+      final increment = reminder.recurrence == ReminderRecurrence.daily
+          ? const Duration(days: 1)
+          : const Duration(days: 7);
+      while (!next.isAfter(now)) {
+        next = next.add(increment);
+      }
+      await repository.saveReminder(
+        TaskReminder(
+          id: reminder.id,
+          taskId: reminder.taskId,
+          scheduledAt: next,
+          origin: reminder.origin,
+          basis: reminder.basis,
+          recurrence: reminder.recurrence,
+        ),
+      );
+    }
+  }
+
   Future<void> refreshNotifications({bool requestPermission = false}) async {
     if (busy || loading || _refreshingNotifications || _disposed) return;
     _refreshingNotifications = true;
     try {
+      await _advanceRecurringReminders();
+      data = await repository.readWorkspace();
       await _syncNotifications(requestPermission: requestPermission);
     } finally {
       _refreshingNotifications = false;
@@ -140,6 +184,10 @@ class WorkspaceModel extends ChangeNotifier {
 
   Future<String> exportLocalData() => LocalDataExport(repository).buildJson();
 
+  Future<bool> importLocalData(String json) async => change(() async {
+    await LocalDataImport(repository).restore(json);
+  });
+
   Future<bool> deleteLocalData() async {
     if (busy || loading || _disposed) return false;
     busy = true;
@@ -156,6 +204,10 @@ class WorkspaceModel extends ChangeNotifier {
         areas: ['Work', 'Study', 'Health', 'Relationships', 'Rest'],
       );
       resetRevision++;
+      final callback = afterChange;
+      if (callback != null) {
+        unawaited(Future<void>.delayed(Duration.zero, callback));
+      }
       try {
         data = await repository.readWorkspace();
       } catch (_) {

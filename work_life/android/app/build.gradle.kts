@@ -1,11 +1,33 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val signingProperties = Properties()
+val signingPropertiesFile = rootProject.file("key.properties")
+if (signingPropertiesFile.exists()) {
+    signingPropertiesFile.inputStream().use(signingProperties::load)
+}
+val releaseStorePath = System.getenv("WORK_LIFE_ANDROID_KEYSTORE")
+    ?: signingProperties.getProperty("storeFile")
+val releaseStorePassword = System.getenv("WORK_LIFE_ANDROID_STORE_PASSWORD")
+    ?: signingProperties.getProperty("storePassword")
+val releaseKeyAlias = System.getenv("WORK_LIFE_ANDROID_KEY_ALIAS")
+    ?: signingProperties.getProperty("keyAlias")
+val releaseKeyPassword = System.getenv("WORK_LIFE_ANDROID_KEY_PASSWORD")
+    ?: signingProperties.getProperty("keyPassword")
+val hasReleaseSigning = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
-    namespace = "com.example.work_life"
+    namespace = "com.worklife.app"
     compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
@@ -16,8 +38,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.work_life"
+        applicationId = "com.worklife.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -30,11 +51,22 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Without private credentials Gradle produces an unsigned release
+            // artifact; it never falls back to the debug signing identity.
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 }

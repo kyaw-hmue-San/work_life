@@ -23,14 +23,38 @@ The owner confirmed expanding the existing Flutter project into the full app on 
 11. From a task with a reminder, choose **Snooze** and select 10 minutes, 30 minutes, 1 hour, or Tomorrow. Repeating the action replaces the same reminder and notification; the task deadline and status remain unchanged.
 12. In **More → Settings**, choose a Default reminder. It is used when a task first receives a future Planner time without an existing or explicitly removed reminder. Date-only deadlines and unscheduled tasks do not create a clock-based reminder.
 
-Captures, shared records, plans, focus state and account-scoped local workspaces persist locally. Unsaved forms and unsubmitted session notes are not durable. Account sessions use platform secure storage, but there is no cloud backup or sync yet. See [Supabase and Google sign-in setup](SUPABASE_GOOGLE_SETUP.md) for configuration.
+Captures, shared records, plans, focus state and account-scoped workspaces persist
+in SQLite first. Authenticated workspaces then synchronize incrementally through
+Supabase; guest workspaces remain local unless explicitly exported.
+
+Schema v14 adds a durable SQLite outbox, per-record remote revision metadata and
+a server checkpoint. SQLite triggers enqueue domain changes in the same local
+transaction as the user action. Startup, resume, successful mutations, Inbox
+capture and manual retry run the coordinator. Failed uploads remain queued with
+bounded exponential backoff.
+
+The remote store uses one generic versioned record per stable domain ID. Server
+revisions, not device clocks, drive incremental download. Ordinary concurrent
+edits use deterministic server-arrival last-write-wins. On first sync, an
+already-versioned remote record wins over an unversioned local record with the
+same stable ID; local-only records are then uploaded. A remote tombstone cannot
+be resurrected by an offline client whose base revision predates that
+tombstone. Upload mutation IDs make retries idempotent.
+
+Remote batches are applied to SQLite transactionally in dependency order while
+outbox triggers are suppressed. Checklist IDs remain embedded stable child IDs.
+Reminder intent, defaults, suppressions and Quiet Hours synchronize, while
+native notification delivery status/IDs remain device-local. Unsaved forms,
+temporary images, AI responses and platform bookkeeping are not synchronized.
+See [Supabase and Google sign-in setup](SUPABASE_GOOGLE_SETUP.md).
 
 ## Code map and learning notes
 
 | Location | Responsibility |
 | --- | --- |
 | `lib/main.dart` | App theme and repository injection |
-| `lib/accounts/` | Optional Supabase email/Google sign-in, secure session storage, account-scoped local databases |
+| `lib/accounts/` | Supabase email/Google sign-in, secure sessions and account-scoped local databases |
+| `lib/sync/` | Durable offline outbox, incremental coordinator and Supabase remote adapter |
 | `lib/data/app_database.dart` | SQLite schema, foreign keys, versioned migrations |
 | `lib/captures/` | Original text capture, search and save-error handling |
 | `lib/workspace/records.dart` | Typed records and time/overlap helpers |
@@ -57,3 +81,19 @@ This version uses native Navigator routes and constructor injection. Account con
 - AI drafts, voice and integrations in their later backlog stages.
 
 Single-device local data is useful now. Robust multi-device synchronization still requires its own implementation and failure tests; a cloud SDK alone will not supply it.
+
+## Day Architect — implementation checkpoint (28 September 2026)
+
+The Day Architect slice builds on Plan My Day instead of replacing it. SQLite schema v17 adds recurring weekly schedules, per-date cancellation/time/move exceptions, and planning preferences including sleep/work windows, meals, exercise, buffers and planning style; the schedule and preferences are exposed from Settings and as optional onboarding setup. Schedule-image proposals capture weekday and can be reviewed, edited, assigned a semester date range, and saved as recurring commitments. These records are included in JSON backup/import and in the local sync outbox. Supabase needs migration `202609280001_day_architect_entities.sql` applied before these records can sync remotely.
+
+`DayContextBuilder` now gathers only date-relevant recurring commitments, existing Planner blocks, near-term/due/overdue or already scheduled tasks, routines, preferences, and capacity estimates. `WeekContextBuilder` deliberately builds seven contexts by reusing the same day model. AI schedule proposals include explicit block kind and operation labels; existing omitted flexible blocks become reviewable removal suggestions, while fixed blocks are locked and preserved. Repository approval remains transactional/idempotent and validates overlaps, recurring commitments, transition buffer, waking hours, focus cutoff, and available daily capacity. Lifestyle blocks continue to be Planner-only, with no fake Task creation.
+
+AI output remains editable and the provider remains optional; no automated test calls a paid model. Physical-device acceptance, cloud migration deployment, and live-provider verification remain external.
+
+## Plan My Week — implementation checkpoint (28 September 2026)
+
+Planner now exposes **Plan My Week with AI** for the Monday-to-Sunday week containing the selected calendar date. `WeekContextBuilder` reuses the hardened date-scoped context and adds a compact weekly payload containing fixed/recurring commitments, existing Planner blocks, relevant deadline work, cross-day capacity totals, overloaded dates, lighter dates, routines, planning preferences, and one temporary natural-language adjustment.
+
+The provider returns the existing typed `AiScheduleProposal`; no second persistence model was introduced. The review screen groups native editable cards under all seven dates, shows intentional open days, permits per-block inclusion and locking, exposes ADD/MOVE/CHANGE/REMOVE/UNCHANGED diffs, constrains manual date edits to the week, and supports regeneration or conversational adjustment. Fixed recurring commitments and fixed Planner blocks are normalized back to their exact IDs/times and locked before review.
+
+Approval uses the existing transaction and normal Planner/reminder/sync paths. All seven day fingerprints are checked inside the transaction, so a change on any affected date makes the proposal stale before writes. Cross-day moves preserve plan/task IDs; split sessions can share one Task without creating duplicate Tasks; linked work after its Task deadline is rejected; partial acceptance still validates against retained blocks. Lifestyle blocks remain Planner-only.

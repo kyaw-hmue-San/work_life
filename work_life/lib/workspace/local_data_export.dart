@@ -36,6 +36,35 @@ class LocalDataExport {
         workspace.routines,
         (r) => r.id,
       ).map(_routine).toList(),
+      'recurringSchedules': _sorted(workspace.recurringSchedules, (s) => s.id)
+          .map(
+            (s) => {
+              'id': s.id,
+              'title': s.title,
+              'type': s.type.name,
+              'weekday': s.weekday,
+              'startTime': s.startTime,
+              'endTime': s.endTime,
+              'startDate': s.startDate,
+              'endDate': s.endDate,
+              'location': s.location,
+              'notes': s.notes,
+              'fixed': s.fixed,
+            },
+          )
+          .toList(),
+      'scheduleExceptions': workspace.scheduleExceptions
+          .map(
+            (e) => {
+              'scheduleId': e.scheduleId,
+              'day': e.day,
+              'cancelled': e.cancelled,
+              'startTime': e.startTime,
+              'endTime': e.endTime,
+              'movedToDate': e.movedToDate,
+            },
+          )
+          .toList(),
       'routineRecords':
           ([...workspace.routineRecords]..sort((a, b) {
                 final routine = a.routineId.compareTo(b.routineId);
@@ -56,6 +85,19 @@ class LocalDataExport {
           'endMinute': workspace.quietHours.endMinute,
         },
         'reminderDefault': workspace.reminderDefault.name,
+        'planningPreferences': {
+          'wakeTime': workspace.planningPreferences.wakeTime,
+          'bedTime': workspace.planningPreferences.bedTime,
+          'transitionMinutes': workspace.planningPreferences.transitionMinutes,
+          'breakMinutes': workspace.planningPreferences.breakMinutes,
+          'exercisePeriod': workspace.planningPreferences.exercisePeriod,
+          'avoidFocusAfter': workspace.planningPreferences.avoidFocusAfter,
+          'maxFocusMinutes': workspace.planningPreferences.maxFocusMinutes,
+          'style': workspace.planningPreferences.style,
+          'breakfastWindow': workspace.planningPreferences.breakfastWindow,
+          'lunchWindow': workspace.planningPreferences.lunchWindow,
+          'dinnerWindow': workspace.planningPreferences.dinnerWindow,
+        },
       },
     };
     return jsonEncode({
@@ -102,6 +144,7 @@ class LocalDataExport {
     'deadline': value.deadline,
     'minutes': value.minutes,
     'notes': value.notes,
+    'priority': value.priority.name,
     'status': value.status.name,
     'checklist': value.checklist
         .map((item) => {'id': item.id, 'text': item.text, 'done': item.done})
@@ -154,5 +197,7 @@ class LocalDataExport {
     'taskId': value.taskId,
     'scheduledAt': value.scheduledAt.toUtc().toIso8601String(),
     'origin': value.origin.name,
+    'basis': value.basis.name,
+    'recurrence': value.recurrence.name,
   };
 }

@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Work Life (account + AI)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "deviceId": "3B55E334-8B2E-4729-A2E7-E685E6E5CD2C",
+      "toolArgs": [
+        "--dart-define-from-file=config/.env",
+        "--dart-define=ALLOW_INSECURE_LOCAL_AI=true"
+      ]
+    }
+  ]
+}

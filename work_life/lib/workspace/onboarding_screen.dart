@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'records.dart';
 import 'reminder_defaults.dart';
 import 'workspace_model.dart';
+import 'day_architect_settings.dart';
 
 /// First-run editing of the same records used by Settings and Life Map.
 class OnboardingScreen extends StatefulWidget {
@@ -48,6 +49,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     listenable: widget.model,
     builder: (context, _) {
       final busy = widget.model.busy;
+      final theme = Theme.of(context);
+      final colors = theme.colorScheme;
+      final titles = [
+        'Welcome to Work Life',
+        'Make room for your life',
+        'Reminders that suit you',
+      ];
+      final icons = [
+        Icons.wb_sunny_outlined,
+        Icons.balance,
+        Icons.notifications_none_rounded,
+      ];
       return PopScope(
         canPop: widget.onFinished != null && step == 0 && !busy,
         onPopInvokedWithResult: (didPop, result) {
@@ -73,18 +86,31 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   padding: const EdgeInsets.all(24),
                   children: [
                     if (busy) const LinearProgressIndicator(),
-                    Text(
-                      [
-                        'Welcome to Work Life',
-                        'Make room for your life',
-                        'Reminders that suit you',
-                      ][step],
-                      style: Theme.of(context).textTheme.headlineMedium,
+                    Row(
+                      children: [
+                        Icon(icons[step], color: colors.primary, size: 28),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            titles[step],
+                            style: theme.textTheme.headlineMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 8),
+                    const SizedBox(height: 8),
                     if (step == 0)
-                      const Text(
-                        'Capture what matters. Plan realistically. Focus on one thing. Make room for work, relationships, and rest.\n\nYour workspace works offline. You can adjust your choices later.',
+                      Card(
+                        elevation: 0,
+                        child: const Padding(
+                          padding: EdgeInsets.all(20),
+                          child: Text(
+                            'Capture what matters. Plan realistically. Focus on one thing. Make room for work, relationships, and rest.\n\nYour workspace works offline. You can adjust your choices later.',
+                          ),
+                        ),
                       ),
                     if (step == 1) ...[
                       const Text(
@@ -118,13 +144,40 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       ),
                       const SizedBox(height: 16),
                       ...ReminderDefault.values.map(
-                        (value) => CheckboxListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(reminderDefaultLabel(value)),
-                          value: reminder == value,
-                          onChanged: busy
+                        (value) => Card(
+                          elevation: 0,
+                          child: CheckboxListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                            ),
+                            title: Text(reminderDefaultLabel(value)),
+                            value: reminder == value,
+                            onChanged: busy
+                                ? null
+                                : (_) => setState(() => reminder = value),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Card(
+                        child: ListTile(
+                          leading: const Icon(Icons.event_repeat),
+                          title: const Text(
+                            'Help AI understand your week (optional)',
+                          ),
+                          subtitle: const Text(
+                            'Add classes or work hours and choose a planning style. You can skip this and set it up later.',
+                          ),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: busy
                               ? null
-                              : (_) => setState(() => reminder = value),
+                              : () => Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => DayArchitectSettings(
+                                      model: widget.model,
+                                    ),
+                                  ),
+                                ),
                         ),
                       ),
                     ],

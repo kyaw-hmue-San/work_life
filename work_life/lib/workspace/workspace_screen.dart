@@ -1,12 +1,24 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import '../ai/capture_assistant.dart';
+import '../ai/aimlapi_client.dart';
+import '../ai/day_context_builder.dart';
+import '../ai/ai_proposal_screen.dart';
+import '../ai/ai_capture_proposal_screen.dart';
+import '../ai/ai_proposals.dart';
+import '../ai/ai_schedule_screen.dart';
 import '../captures/capture.dart';
 import '../captures/inbox_screen.dart';
 import '../notifications/reminder_notifications.dart';
+import '../notifications/notification_driver.dart';
+import '../sync/workspace_sync_coordinator.dart';
 import 'editors.dart';
 import 'focus_screen.dart';
+import 'day_architect_settings.dart';
+import 'calendar_progress.dart';
 import 'records.dart';
 import 'reminder_editor.dart';
 import 'settings_screen.dart';
@@ -24,12 +36,14 @@ class WorkspaceScreen extends StatefulWidget {
     this.accountNotice,
     this.notifications,
     this.notificationScope = 'guest',
+    this.sync,
   });
   final WorkspaceRepository repository;
   final WidgetBuilder? accountBuilder;
   final String? accountLabel, accountNotice;
   final ReminderNotifications? notifications;
   final String notificationScope;
+  final WorkspaceSyncCoordinator? sync;
   @override
   State<WorkspaceScreen> createState() => _WorkspaceScreenState();
 }
@@ -48,11 +62,18 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       widget.repository,
       notifications: widget.notifications,
       notificationScope: widget.notificationScope,
-    )..load();
+      afterChange: widget.sync?.sync,
+    );
+    unawaited(_loadAndSync());
     dayTicker = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted) setState(() {});
       unawaited(model.refreshNotifications());
     });
+  }
+
+  Future<void> _loadAndSync() async {
+    await model.load();
+    await _sync();
   }
 
   @override
@@ -60,7 +81,16 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     if (state == AppLifecycleState.resumed && mounted) {
       setState(() {});
       unawaited(model.refreshNotifications());
+      unawaited(_sync());
     }
+  }
+
+  Future<void> _sync() async {
+    final coordinator = widget.sync;
+    if (coordinator == null) return;
+    await coordinator.sync();
+    if (!mounted) return;
+    await model.load();
   }
 
   @override
@@ -83,6 +113,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     ProjectEntry? entry,
     ProjectEntry? sourceEntry,
     String? projectId,
+    bool routineTemplate = false,
   }) {
     Navigator.push(
       context,
@@ -99,6 +130,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
           sourceEntry: sourceEntry,
           projectId: projectId,
           day: selectedDay,
+          routineTemplate: routineTemplate,
         ),
       ),
     );
@@ -145,7 +177,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       ),
       title: Text(task.title),
       subtitle: Text(
-        '${task.area} · ${task.minutes} min${task.deadline == null ? '' : ' · Due ${task.deadline}'}${task.active ? '' : ' · ${task.status.name}'}',
+        '${task.area} · ${task.priority.name} priority · ${task.minutes} min${task.deadline == null ? '' : ' · Due ${task.deadline}'}${task.active ? '' : ' · ${task.status.name}'}',
       ),
       trailing: const Icon(Icons.chevron_right),
       onTap: () => push(TaskDetail(model: model, taskId: task.id)),
@@ -166,6 +198,19 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     final now = DateTime.now();
     final todays = model.tasksForDay(now);
     final plans = model.data.plans.where((p) => p.occursOn(now)).toList();
+    final recurring = _recurringOccurrences(now);
+    final scheduledMinutes =
+        plans.fold<int>(0, (sum, p) => sum + p.minutes) +
+        recurring.fold<int>(0, (sum, event) {
+          int minute(String text) {
+            final parts = text.split(':');
+            return int.parse(parts[0]) * 60 + int.parse(parts[1]);
+          }
+
+          return sum +
+              minute(event['end'] as String) -
+              minute(event['start'] as String);
+        });
     final unplanned = model.data.tasks
         .where((t) => t.active && !todays.any((v) => v.id == t.id))
         .take(3)
@@ -189,6 +234,17 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
             icon: const Icon(Icons.spa_outlined),
             label: const Text('Protect personal time'),
           ),
+          OutlinedButton.icon(
+            onPressed: model.busy ? null : () => _planWithAi(now),
+            icon: const Icon(Icons.auto_awesome),
+            label: const Text('Plan My Day'),
+          ),
+          if (todays.isNotEmpty)
+            OutlinedButton.icon(
+              onPressed: model.busy ? null : () => _reorganizeWithAi(now),
+              icon: const Icon(Icons.event_repeat_outlined),
+              label: const Text('Reschedule with AI'),
+            ),
         ],
       ),
       if (model.activeSession != null)
@@ -206,29 +262,40 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       section('Pending reminders'),
       if (model.notifications case final notifications?) ...[
         Text(notifications.message),
-        Wrap(
-          spacing: 8,
-          children: [
-            TextButton(
+        if (notifications.permission == NotificationPermission.notDetermined)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.icon(
               onPressed: notifications.working || model.busy
                   ? null
                   : () => model.refreshNotifications(requestPermission: true),
-              child: const Text('Enable notifications'),
+              icon: const Icon(Icons.notifications_active_outlined),
+              label: const Text('Enable notifications'),
             ),
-            TextButton(
+          )
+        else if (notifications.permission == NotificationPermission.blocked)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
               onPressed: notifications.working
                   ? null
                   : notifications.openSettings,
-              child: const Text('Notification settings'),
+              icon: const Icon(Icons.settings_outlined),
+              label: const Text('Open notification settings'),
             ),
-            TextButton(
+          )
+        else if (notifications.permission == NotificationPermission.allowed &&
+            notifications.message.startsWith('Couldn’t'))
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
               onPressed: notifications.working || model.busy
                   ? null
                   : model.refreshNotifications,
-              child: const Text('Retry notifications'),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Retry notifications'),
             ),
-          ],
-        ),
+          ),
       ] else
         const Text(
           'In-app reminders · device notifications unavailable in this session.',
@@ -252,12 +319,28 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       if (todays.isEmpty)
         empty('Nothing due or planned. Choose a next step when you’re ready.'),
       ...todays.map(taskTile),
+      if (scheduledMinutes >= 480)
+        Card(
+          elevation: 0,
+          color: Theme.of(context).colorScheme.secondaryContainer,
+          child: const ListTile(
+            leading: Icon(Icons.balance_outlined),
+            title: Text('This is a heavily scheduled day'),
+            subtitle: Text(
+              'Protect a break, movement, and some unscheduled time. AI planning will avoid filling every gap.',
+            ),
+          ),
+        ),
       section('Your time'),
-      if (plans.isEmpty)
+      if (plans.isEmpty && recurring.isEmpty)
         empty(
           'Leave breathing room. Add work, a meal, time together, or a break in Planner.',
         ),
       ...plans.map(planTile),
+      if (recurring.isNotEmpty) ...[
+        section('Recurring commitments'),
+        ...recurring.map(recurringTile),
+      ],
       if (model.data.routines.isNotEmpty) ...[
         section('Everyday care'),
         ...model.data.routines.map(routineTile),
@@ -305,6 +388,24 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
               capture.originalText,
               style: Theme.of(context).textTheme.titleLarge,
             ),
+            if (const CaptureAssistant().suggest(capture.originalText)
+                case final suggestion?) ...[
+              const SizedBox(height: 20),
+              Card(
+                elevation: 0,
+                color: Theme.of(context).colorScheme.secondaryContainer,
+                child: ListTile(
+                  leading: const Icon(Icons.auto_awesome_outlined),
+                  title: Text('Quick suggestion · ${suggestion.kind}'),
+                  subtitle: Text(suggestion.prompt),
+                ),
+              ),
+            ],
+            OutlinedButton.icon(
+              onPressed: () => _organizeWithAi(capture),
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('Understand with AI'),
+            ),
             const SizedBox(height: 24),
             if (linked.isEmpty)
               FilledButton.icon(
@@ -332,6 +433,588 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     ),
   );
 
+  Future<void> _organizeWithAi(Capture capture) async {
+    final client = AimlApiClient();
+    if (!client.configured) {
+      client.dispose();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('AI assistance is unavailable'),
+          content: const Text(
+            'AI assistance is not enabled in this build. Your original capture and offline suggestions remain available.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        title: Text('Building an editable proposal…'),
+        content: LinearProgressIndicator(),
+      ),
+    );
+    try {
+      final proposal = await client.classifyCapture(
+        capture.originalText,
+        existingAreas: model.data.areas,
+      );
+      if (!mounted) return;
+      Navigator.pop(context);
+      if (proposal.kind == AiCaptureKind.project) {
+        await Navigator.push<bool>(
+          context,
+          MaterialPageRoute<bool>(
+            builder: (_) => AiProjectProposalScreen(
+              model: model,
+              proposal: proposal.project!,
+              captureId: capture.id,
+            ),
+          ),
+        );
+      } else if (proposal.kind == AiCaptureKind.planningRequest) {
+        final day = DateTime.parse(proposal.planningDate!);
+        final schedule = await _requestDayPlan(day);
+        if (!mounted) return;
+        await Navigator.push<bool>(
+          context,
+          MaterialPageRoute<bool>(
+            builder: (_) => AiScheduleProposalScreen(
+              model: model,
+              proposal: schedule,
+              title: 'Review ${proposal.planningDate} plan',
+            ),
+          ),
+        );
+      } else {
+        await Navigator.push<bool>(
+          context,
+          MaterialPageRoute<bool>(
+            builder: (_) => AiCaptureProposalScreen(
+              model: model,
+              proposal: proposal,
+              captureId: capture.id,
+            ),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${error is AiServiceException ? error.message : 'AI returned a proposal this app could not read.'} Your capture is safe.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      client.dispose();
+    }
+  }
+
+  Future<AiProjectProposal> _requestProjectImprovement(
+    Project project,
+    List<Task> tasks,
+  ) async {
+    final client = AimlApiClient();
+    try {
+      return await client.improveProject(
+        jsonEncode({
+          'project': {
+            'id': project.id,
+            'title': project.title,
+            'description': project.description,
+            'area': project.area,
+          },
+          'tasks': tasks
+              .map(
+                (task) => {
+                  'taskId': task.id,
+                  'title': task.title,
+                  'area': task.area,
+                  'priority': task.priority.name,
+                  'minutes': task.minutes,
+                  'deadline': task.deadline,
+                  'status': task.status.name,
+                  'checklist': task.checklist.map((item) => item.text).toList(),
+                },
+              )
+              .toList(),
+          'request': 'Make this project realistic, preserve useful existing tasks, clarify titles, and suggest only genuinely missing next actions.',
+        }),
+      );
+    } finally {
+      client.dispose();
+    }
+  }
+
+  Future<void> _improveProject(Project project, List<Task> tasks) async {
+    final configured = AimlApiClient().configured;
+    if (!configured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI assistance is not available in this build.'),
+        ),
+      );
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        title: Text('Checking this project…'),
+        content: LinearProgressIndicator(),
+      ),
+    );
+    try {
+      final proposal = await _requestProjectImprovement(project, tasks);
+      if (!mounted) return;
+      Navigator.pop(context);
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute<bool>(
+          builder: (_) => AiProjectProposalScreen(
+            model: model,
+            proposal: proposal,
+            targetProjectId: project.id,
+            onRegenerate: () => _requestProjectImprovement(project, tasks),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${error is AiServiceException ? error.message : 'Couldn’t create project improvements.'} Your project was not changed.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<AiScheduleProposal> _requestDayPlan(
+    DateTime day, {
+    String request = '',
+  }) async {
+    final client = AimlApiClient();
+    try {
+      final dayContext = const DayContextBuilder().build(
+        model.data,
+        day,
+        request: request,
+      );
+      final result = await client.planDay(jsonEncode(dayContext));
+      final dayKeyValue = dayKey(day);
+      result.baseFingerprints[dayKeyValue] = const DayContextBuilder()
+          .fingerprint(model.data, day);
+      final commitments = (dayContext['fixedCommitments'] as List)
+          .cast<Map<String, Object?>>();
+      for (final recurring in commitments) {
+        final scheduleId = recurring['scheduleId'] as String;
+        final existingEvent = result.events
+            .where(
+              (event) =>
+                  event.recurringScheduleId == scheduleId ||
+                  event.title.trim().toLowerCase() ==
+                      (recurring['title'] as String).trim().toLowerCase(),
+            )
+            .toList();
+        final event = existingEvent.isEmpty
+            ? AiScheduleEvent(title: recurring['title'] as String)
+            : existingEvent.first;
+        result.events.removeWhere(
+          (candidate) =>
+              existingEvent.length > 1 &&
+              candidate != event &&
+              candidate.title.trim().toLowerCase() ==
+                  (recurring['title'] as String).trim().toLowerCase(),
+        );
+        event.recurringScheduleId = scheduleId;
+        event.title = recurring['title'] as String;
+        event.taskId = null;
+        event.area = 'Study';
+        event.date = dayKeyValue;
+        event.start = recurring['start'] as String;
+        event.end = recurring['end'] as String;
+        event.kind = 'existing_planner';
+        event.operation = 'unchanged';
+        event.locked = recurring['fixed'] as bool? ?? true;
+        if (existingEvent.isEmpty) result.events.insert(0, event);
+      }
+      final existing = model.data.plans.where((p) => p.occursOn(day));
+      for (final event in result.events) {
+        PlanBlock? original;
+        for (final block in existing) {
+          if (block.id == event.planId) {
+            original = block;
+            break;
+          }
+        }
+        if (original?.fixed == true) {
+          event.locked = true;
+          event.operation = 'unchanged';
+          event.title = original!.title;
+          event.start =
+              '${original.start.hour.toString().padLeft(2, '0')}:${original.start.minute.toString().padLeft(2, '0')}';
+          event.end =
+              '${original.end.hour.toString().padLeft(2, '0')}:${original.end.minute.toString().padLeft(2, '0')}';
+          event.taskId = original.taskId;
+          event.area = original.area;
+        }
+      }
+      for (final block in existing) {
+        if (result.events.any((e) => e.planId == block.id)) continue;
+        result.events.add(
+          AiScheduleEvent(
+            title: block.title,
+            planId: block.id,
+            taskId: block.taskId,
+            area: block.area,
+            date: dayKey(block.start),
+            start:
+                '${block.start.hour.toString().padLeft(2, '0')}:${block.start.minute.toString().padLeft(2, '0')}',
+            end:
+                '${block.end.hour.toString().padLeft(2, '0')}:${block.end.minute.toString().padLeft(2, '0')}',
+            kind: 'existing_planner',
+            operation: block.fixed ? 'unchanged' : 'remove',
+            locked: block.fixed,
+            notes: block.fixed
+                ? 'Kept as a locked commitment.'
+                : 'Not included in the new proposal.',
+          ),
+        );
+      }
+      return result;
+    } finally {
+      client.dispose();
+    }
+  }
+
+  Future<void> _planWithAi(DateTime day) async {
+    if (!AimlApiClient().configured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI planning is not available in this build.'),
+        ),
+      );
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        title: Text('Building a balanced day…'),
+        content: LinearProgressIndicator(),
+      ),
+    );
+    try {
+      final proposal = await _requestDayPlan(day);
+      if (!mounted) return;
+      Navigator.pop(context);
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute<bool>(
+          builder: (_) => AiScheduleProposalScreen(
+            model: model,
+            proposal: proposal,
+            title: 'Plan My Day',
+            onRegenerate: () => _requestDayPlan(day),
+            onAdjust: (adjustment) => _requestDayPlan(day, request: adjustment),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${error is AiServiceException ? error.message : 'Couldn’t create a day plan.'} Your current Planner was not changed.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<AiScheduleProposal> _requestWeekPlan(
+    DateTime selected, {
+    String request = '',
+  }) async {
+    final monday = calendarDay(selected, -(selected.weekday - 1));
+    const builder = WeekContextBuilder();
+    final contexts = builder.build(model.data, monday);
+    final client = AimlApiClient();
+    try {
+      final result = await client.planWeek(
+        jsonEncode(
+          builder.buildPlanningContext(model.data, monday, request: request),
+        ),
+      );
+      result.baseFingerprints.addAll(builder.fingerprints(model.data, monday));
+
+      for (final dayContext in contexts) {
+        final date = dayContext['date'] as String;
+        final commitments = (dayContext['fixedCommitments'] as List)
+            .cast<Map<String, Object?>>();
+        for (final recurring in commitments) {
+          final scheduleId = recurring['scheduleId'] as String;
+          final matches = result.events
+              .where(
+                (event) =>
+                    event.recurringScheduleId == scheduleId ||
+                    (event.date == date &&
+                        event.title.trim().toLowerCase() ==
+                            (recurring['title'] as String)
+                                .trim()
+                                .toLowerCase()),
+              )
+              .toList();
+          final event = matches.isEmpty
+              ? AiScheduleEvent(title: recurring['title'] as String)
+              : matches.first;
+          for (final duplicate in matches.skip(1)) {
+            result.events.remove(duplicate);
+          }
+          event
+            ..recurringScheduleId = scheduleId
+            ..title = recurring['title'] as String
+            ..taskId = null
+            ..area = 'Study'
+            ..date = date
+            ..start = recurring['start'] as String
+            ..end = recurring['end'] as String
+            ..kind = 'existing_planner'
+            ..operation = 'unchanged'
+            ..locked = recurring['fixed'] as bool? ?? true;
+          if (matches.isEmpty) result.events.add(event);
+        }
+      }
+
+      final endExclusive = calendarDay(monday, 7);
+      final existing = model.data.plans
+          .where(
+            (plan) =>
+                !plan.start.isBefore(monday) &&
+                plan.start.isBefore(endExclusive),
+          )
+          .toList();
+      for (final event in result.events) {
+        PlanBlock? original;
+        for (final block in existing) {
+          if (block.id == event.planId) {
+            original = block;
+            break;
+          }
+        }
+        if (original?.fixed == true) {
+          event
+            ..locked = true
+            ..operation = 'unchanged'
+            ..title = original!.title
+            ..date = dayKey(original.start)
+            ..start = _planClock(original.start)
+            ..end = _planClock(original.end)
+            ..taskId = original.taskId
+            ..area = original.area;
+        }
+      }
+      for (final block in existing) {
+        if (result.events.any((event) => event.planId == block.id)) continue;
+        result.events.add(
+          AiScheduleEvent(
+            title: block.title,
+            planId: block.id,
+            taskId: block.taskId,
+            area: block.area,
+            date: dayKey(block.start),
+            start: _planClock(block.start),
+            end: _planClock(block.end),
+            kind: 'existing_planner',
+            operation: block.fixed ? 'unchanged' : 'remove',
+            locked: block.fixed,
+            notes: block.fixed
+                ? 'Kept as a locked commitment.'
+                : 'Not included in the new weekly proposal.',
+          ),
+        );
+      }
+      result.events.sort((a, b) {
+        final date = (a.date ?? '').compareTo(b.date ?? '');
+        return date != 0 ? date : (a.start ?? '').compareTo(b.start ?? '');
+      });
+      return result;
+    } finally {
+      client.dispose();
+    }
+  }
+
+  String _planClock(DateTime value) =>
+      '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+
+  Future<void> _planWeekWithAi(DateTime selected) async {
+    final availability = AimlApiClient();
+    final configured = availability.configured;
+    availability.dispose();
+    if (!configured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI weekly planning is not available in this build.'),
+        ),
+      );
+      return;
+    }
+    final monday = calendarDay(selected, -(selected.weekday - 1));
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        title: Text('Balancing your week…'),
+        content: LinearProgressIndicator(),
+      ),
+    );
+    try {
+      final proposal = await _requestWeekPlan(monday);
+      if (!mounted) return;
+      Navigator.pop(context);
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute<bool>(
+          builder: (_) => AiScheduleProposalScreen(
+            model: model,
+            proposal: proposal,
+            title: 'Plan My Week',
+            weekStart: monday,
+            onRegenerate: () => _requestWeekPlan(monday),
+            onAdjust: (adjustment) =>
+                _requestWeekPlan(monday, request: adjustment),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${error is AiServiceException ? error.message : 'Couldn’t create a weekly plan.'} Your current Planner was not changed.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<AiScheduleProposal> _requestRecoveryPlan(DateTime from) async {
+    final end = DateTime(from.year, from.month, from.day + 7);
+    final client = AimlApiClient();
+    try {
+      final result = await client.planDay(
+        jsonEncode({
+          'dateRange': {'from': dayKey(from), 'through': dayKey(end)},
+          'unfinishedTasks': model.data.tasks
+              .where((task) => task.active)
+              .map(
+                (task) => {
+                  'taskId': task.id,
+                  'title': task.title,
+                  'area': task.area,
+                  'priority': task.priority.name,
+                  'minutes': task.minutes,
+                  'deadline': task.deadline,
+                },
+              )
+              .toList(),
+          'existingPlanner': model.data.plans
+              .where(
+                (plan) =>
+                    !plan.start.isBefore(DateUtils.dateOnly(from)) &&
+                    plan.start.isBefore(calendarDay(end, 1)),
+              )
+              .map(
+                (plan) => {
+                  'planId': plan.id,
+                  'taskId': plan.taskId,
+                  'title': plan.title,
+                  'start': plan.start.toIso8601String(),
+                  'minutes': plan.minutes,
+                  'fixed': plan.fixed,
+                },
+              )
+              .toList(),
+          'instructions': 'Redistribute unfinished work across the range. Respect deadlines and fixed blocks. Do not push everything to tomorrow. Leave recovery time and avoid overloaded days.',
+        }),
+      );
+      const builder = DayContextBuilder();
+      for (var index = 0; index <= 7; index++) {
+        final day = DateTime(from.year, from.month, from.day + index);
+        result.baseFingerprints[dayKey(day)] = builder.fingerprint(
+          model.data,
+          day,
+        );
+      }
+      return result;
+    } finally {
+      client.dispose();
+    }
+  }
+
+  Future<void> _reorganizeWithAi(DateTime from) async {
+    if (!AimlApiClient().configured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI rescheduling is not available in this build.'),
+        ),
+      );
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        title: Text('Reorganizing unfinished work…'),
+        content: LinearProgressIndicator(),
+      ),
+    );
+    try {
+      final proposal = await _requestRecoveryPlan(from);
+      if (!mounted) return;
+      Navigator.pop(context);
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute<bool>(
+          builder: (_) => AiScheduleProposalScreen(
+            model: model,
+            proposal: proposal,
+            title: 'Review rescheduled work',
+            onRegenerate: () => _requestRecoveryPlan(from),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${error is AiServiceException ? error.message : 'Couldn’t reorganize this work.'} Your current plan was not changed.',
+          ),
+        ),
+      );
+    }
+  }
+
   Widget projects() => content([
     heading(
       'Projects',
@@ -347,21 +1030,43 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       empty(
         'Start with something that matters: a work project, a course, or a holiday together.',
       ),
-    for (final p in model.data.projects)
-      Card(
-        elevation: 0,
-        color: Colors.white,
-        child: ListTile(
-          leading: const Icon(Icons.folder_outlined),
-          title: Text(p.title),
-          subtitle: Text(
-            '${p.area} · ${model.data.tasks.where((t) => t.projectId == p.id && t.active).length} open tasks',
-          ),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => projectDetail(p.id),
-        ),
-      ),
+    for (final p in model.data.projects) _projectCard(p),
   ]);
+
+  Widget _projectCard(Project project) {
+    final tasks = model.data.tasks
+        .where((task) => task.projectId == project.id)
+        .toList();
+    final completed = tasks
+        .where((task) => task.status == TaskStatus.completed)
+        .length;
+    final progress = tasks.isEmpty ? 0.0 : completed / tasks.length;
+    return Card(
+      elevation: 0,
+      color: Colors.white,
+      child: Column(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.folder_outlined),
+            title: Text(project.title),
+            subtitle: Text(
+              '${project.area} · $completed of ${tasks.length} tasks complete',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => projectDetail(project.id),
+          ),
+          Semantics(
+            label:
+                '${project.title}, ${(progress * 100).round()} percent complete',
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+              child: LinearProgressIndicator(value: progress),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   void projectDetail(String id) => push(
     ListenableBuilder(
@@ -397,6 +1102,24 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
               icon: const Icon(Icons.note_add_outlined),
               label: const Text('Add note, bug, idea or decision'),
             ),
+            OutlinedButton.icon(
+              onPressed: model.busy ? null : () => _improveProject(p, tasks),
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('Improve with AI'),
+            ),
+            if (tasks.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text(
+                '${tasks.where((task) => task.status == TaskStatus.completed).length} / ${tasks.length} tasks complete',
+              ),
+              LinearProgressIndicator(
+                value:
+                    tasks
+                        .where((task) => task.status == TaskStatus.completed)
+                        .length /
+                    tasks.length,
+              ),
+            ],
             section('Project entries'),
             ...model.data.entries
                 .where((e) => e.projectId == p.id)
@@ -532,65 +1255,138 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     );
   }
 
+  List<Map<String, Object?>> _recurringOccurrences(DateTime day) =>
+      ((const DayContextBuilder().build(model.data, day)['fixedCommitments']
+                as List)
+            .cast<Map<String, Object?>>())
+        ..sort(
+          (a, b) => (a['start'] as String).compareTo(b['start'] as String),
+        );
+
+  Widget recurringTile(Map<String, Object?> occurrence) => Card(
+    elevation: 0,
+    color: Colors.white,
+    child: ListTile(
+      leading: const Icon(Icons.event_repeat),
+      title: Text(occurrence['title'] as String),
+      subtitle: Text(
+        '${occurrence['start']}–${occurrence['end']} · ${occurrence['kind']}${occurrence['location'] == '' ? '' : ' · ${occurrence['location']}'}${occurrence['movedFrom'] == null ? '' : ' · moved from ${occurrence['movedFrom']}'}',
+      ),
+      trailing: Icon(
+        occurrence['fixed'] == true ? Icons.lock_outline : Icons.tune,
+      ),
+      onTap: () => push(DayArchitectSettings(model: model)),
+    ),
+  );
+
   Widget planner() {
     final plans = model.data.plans
         .where((p) => p.occursOn(selectedDay))
         .toList();
+    final recurring = _recurringOccurrences(selectedDay);
+    final dayProgress = CalendarProgress(model.data).forDay(selectedDay);
     return content([
       heading(
         'Planner',
         'Plan effort and personal time. Deadlines stay separate.',
       ),
-      Row(
-        children: [
-          IconButton(
-            tooltip: 'Previous day',
-            onPressed: () => setState(
-              () => selectedDay = DateTime(
-                selectedDay.year,
-                selectedDay.month,
-                selectedDay.day - 1,
-              ),
-            ),
-            icon: const Icon(Icons.chevron_left),
-          ),
-          Expanded(
-            child: TextButton(
-              onPressed: () async {
-                final day = await showDatePicker(
-                  context: context,
-                  initialDate: selectedDay,
-                  firstDate: DateTime(2000),
-                  lastDate: DateTime(2200),
-                );
-                if (day != null && mounted) setState(() => selectedDay = day);
-              },
-              child: Text(
-                MaterialLocalizations.of(context).formatMediumDate(selectedDay),
-              ),
-            ),
-          ),
-          IconButton(
-            tooltip: 'Next day',
-            onPressed: () => setState(
-              () => selectedDay = DateTime(
-                selectedDay.year,
-                selectedDay.month,
-                selectedDay.day + 1,
-              ),
-            ),
-            icon: const Icon(Icons.chevron_right),
-          ),
-        ],
+      WorkLifeCalendar(
+        data: model.data,
+        selectedDay: selectedDay,
+        onSelected: (day) => setState(() => selectedDay = day),
       ),
+      const SizedBox(height: 12),
+      Card(
+        elevation: 0,
+        color: Theme.of(context).colorScheme.primaryContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                MaterialLocalizations.of(context).formatFullDate(selectedDay),
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                dayProgress.total == 0
+                    ? 'No linked or due tasks'
+                    : '${dayProgress.completed} of ${dayProgress.total} tasks completed',
+              ),
+              const SizedBox(height: 8),
+              Semantics(
+                label:
+                    '${(dayProgress.fraction * 100).round()} percent complete',
+                child: LinearProgressIndicator(value: dayProgress.fraction),
+              ),
+              for (final task in dayProgress.tasks)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: Icon(
+                    task.status == TaskStatus.completed
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                  ),
+                  title: Text(task.title),
+                  subtitle: Text(
+                    '${task.priority.name} priority${model.reminderFor(task.id) == null ? '' : ' · reminder set'}',
+                  ),
+                  onTap: () => push(TaskDetail(model: model, taskId: task.id)),
+                ),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 12),
+      Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Plan My Week',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                'Balance deadlines, commitments, focus, exercise and open time across Monday to Sunday.',
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: model.busy
+                    ? null
+                    : () => _planWeekWithAi(selectedDay),
+                icon: const Icon(Icons.calendar_view_week),
+                label: const Text('Plan My Week with AI'),
+              ),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 12),
       FilledButton.icon(
         onPressed: () => edit('plan'),
         icon: const Icon(Icons.add),
         label: const Text('Add time block'),
       ),
+      const SizedBox(height: 8),
+      OutlinedButton.icon(
+        onPressed: model.busy ? null : () => _planWithAi(selectedDay),
+        icon: const Icon(Icons.auto_awesome),
+        label: const Text('Optimize this day with AI'),
+      ),
       const SizedBox(height: 20),
-      if (plans.isEmpty)
+      if (plans.isEmpty && recurring.isEmpty)
         empty('An open day. Make room for commitments, buffers, and yourself.'),
+      if (recurring.isNotEmpty) ...[
+        section('Recurring commitments'),
+        ...recurring.map(recurringTile),
+      ],
+      if (plans.isNotEmpty) section('Planned blocks'),
       ...plans.map(planTile),
       section('Due this day'),
       ...model.data.tasks
@@ -691,6 +1487,11 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
             icon: const Icon(Icons.add),
             label: const Text('New routine'),
           ),
+          OutlinedButton.icon(
+            onPressed: () => edit('routine', routineTemplate: true),
+            icon: const Icon(Icons.fitness_center_outlined),
+            label: const Text('Add an exercise routine'),
+          ),
           const SizedBox(height: 16),
           if (model.data.routines.isEmpty)
             empty(
@@ -722,6 +1523,52 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                   0,
             )
             .toList();
+        final completedSessions = sessions
+            .where((s) => s.outcome != null)
+            .toList();
+        final focusMinutes =
+            completedSessions.fold<int>(
+              0,
+              (sum, session) => sum + session.seconds,
+            ) ~/
+            60;
+        final completedRoutines = records.where((r) => r.completed).length;
+        final areasWithActivity = model.data.areas.where((area) {
+          return completedSessions.any((s) => s.area == area) ||
+              records.any((r) => r.completed && r.area == area);
+        }).length;
+        final reviewMessage =
+            completedSessions.isEmpty && completedRoutines == 0
+            ? 'No activity was recorded this week. That is unknown, not a failure — choose one small thing to make room for next week.'
+            : 'You recorded $focusMinutes focus minutes and $completedRoutines routine outcomes across $areasWithActivity life areas. Keep what helped and choose one thing to protect next week.';
+        final exerciseIds = model.data.routines
+            .where((routine) {
+              final text = '${routine.title} ${routine.area}'.toLowerCase();
+              return text.contains('exercise') ||
+                  text.contains('workout') ||
+                  text.contains('fitness') ||
+                  text.contains('health');
+            })
+            .map((routine) => routine.id)
+            .toSet();
+        final exerciseRecords = records
+            .where(
+              (record) =>
+                  exerciseIds.contains(record.routineId) && record.completed,
+            )
+            .toList();
+        final completedFocus = sessions
+            .where((session) => session.outcome != null)
+            .toList();
+        final focusCompleted = completedFocus
+            .where((s) => s.outcome == FocusOutcome.completed)
+            .length;
+        final focusPartial = completedFocus
+            .where((s) => s.outcome == FocusOutcome.partial)
+            .length;
+        final focusBlocked = completedFocus
+            .where((s) => s.outcome == FocusOutcome.blocked)
+            .length;
         return Scaffold(
           appBar: AppBar(title: const Text('Life Map & reflection')),
           body: content([
@@ -733,6 +1580,75 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
               'These are records, not a score for your life. Unrecorded time is unknown. Focus minutes are timer time you chose to finish; they do not prove uninterrupted activity.',
             ),
             const SizedBox(height: 16),
+            Card(
+              elevation: 0,
+              color: Theme.of(context).colorScheme.primaryContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Your week at a glance',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 24,
+                      runSpacing: 12,
+                      children: [
+                        _reviewMetric(
+                          context,
+                          Icons.timelapse,
+                          '$focusMinutes min',
+                          'recorded focus',
+                        ),
+                        _reviewMetric(
+                          context,
+                          Icons.check_circle_outline,
+                          '$completedRoutines',
+                          'routine outcomes',
+                        ),
+                        _reviewMetric(
+                          context,
+                          Icons.spa_outlined,
+                          '$areasWithActivity',
+                          'life areas touched',
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Text(reviewMessage),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (exerciseIds.isNotEmpty)
+              Card(
+                elevation: 0,
+                child: ListTile(
+                  leading: const Icon(Icons.fitness_center_outlined),
+                  title: const Text('Exercise this week'),
+                  subtitle: Text(
+                    '${exerciseRecords.length} recorded session${exerciseRecords.length == 1 ? '' : 's'} · ${exerciseRecords.map((record) => record.day).toSet().length} active day${exerciseRecords.map((record) => record.day).toSet().length == 1 ? '' : 's'}',
+                  ),
+                  trailing: exerciseRecords.isEmpty
+                      ? const Icon(Icons.chevron_right)
+                      : Text('${exerciseRecords.length}/7'),
+                ),
+              ),
+            if (completedFocus.isNotEmpty)
+              Card(
+                elevation: 0,
+                child: ListTile(
+                  leading: const Icon(Icons.timelapse),
+                  title: const Text('Focus history'),
+                  subtitle: Text(
+                    '$focusMinutes recorded minutes · $focusCompleted completed · $focusPartial partial · $focusBlocked blocked',
+                  ),
+                ),
+              ),
             for (final area in model.data.areas)
               Card(
                 elevation: 0,
@@ -768,6 +1684,20 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
         );
       },
     ),
+  );
+
+  Widget _reviewMetric(
+    BuildContext context,
+    IconData icon,
+    String value,
+    String label,
+  ) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Icon(icon, size: 20),
+      const SizedBox(width: 6),
+      Text('$value\n$label'),
+    ],
   );
 
   Future<void> addArea() async {
@@ -813,7 +1743,18 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
         Icons.settings_outlined,
         'Settings',
         'Quiet Hours and notification preferences',
-        () => push(SettingsScreen(model: model)),
+        () => push(SettingsScreen(model: model, sync: widget.sync)),
+      ),
+      (
+        Icons.waving_hand_outlined,
+        'Run onboarding again',
+        'Replay setup without deleting your tasks or preferences',
+        () => push(
+          OnboardingScreen(
+            model: model,
+            onFinished: () => Navigator.of(context).pop(),
+          ),
+        ),
       ),
     ])
       Card(
@@ -840,8 +1781,10 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
         ),
       ),
     section('Your data'),
-    const Text(
-      'Saved on this device. Cloud backup, notifications, and AI are not connected yet. Your captures and tasks work offline.',
+    Text(
+      widget.sync == null
+          ? 'Saved on this device. Guest workspaces stay local unless you explicitly export them.'
+          : 'Saved on this device first, then securely synchronized with your signed-in workspace.',
     ),
   ]);
 
@@ -916,6 +1859,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                                 key: ValueKey(model.resetRevision),
                                 repository: widget.repository,
                                 onOpenCapture: openCapture,
+                                workspaceModel: model,
+                                onLocalChange: widget.sync?.sync,
                               ),
                               projects(),
                               planner(),

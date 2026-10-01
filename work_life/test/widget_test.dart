@@ -1,5 +1,12 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:work_life/ai/aimlapi_client.dart';
 import 'package:work_life/captures/inbox_screen.dart';
 import 'package:work_life/captures/capture.dart';
 import 'package:work_life/captures/capture_repository.dart';
@@ -138,5 +145,60 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('schedule import blocks duplicate submissions', (tester) async {
+    roomyScreen(tester);
+    final selection = Completer<XFile?>();
+    var calls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: InboxScreen(
+          repository: MemoryRepository(),
+          scheduleImagePicker: () {
+            calls++;
+            return selection.future;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Import a schedule image'));
+    await tester.tap(find.text('Import a schedule image'));
+    await tester.tap(find.text('Import a schedule image'), warnIfMissed: false);
+    await tester.pump();
+    expect(calls, 1);
+    selection.complete(null);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('schedule import shows progress and a safe retry on failure', (
+    tester,
+  ) async {
+    roomyScreen(tester);
+    final response = Completer<http.Response>();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: InboxScreen(
+          repository: MemoryRepository(),
+          scheduleImagePicker: () async =>
+              XFile.fromData(Uint8List.fromList([1, 2, 3])),
+          scheduleAiClientFactory: () => AimlApiClient(
+            apiKey: 'test-key',
+            client: MockClient((_) => response.future),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Import a schedule image'));
+    await tester.tap(find.text('Import a schedule image'));
+    await tester.pump();
+    expect(find.text('Reading your schedule'), findsOneWidget);
+    expect(find.text('Cancel'), findsOneWidget);
+    response.complete(http.Response('{"error":{}}', 500));
+    await tester.pumpAndSettle();
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.textContaining('existing data are safe'), findsOneWidget);
   });
 }

@@ -4,7 +4,14 @@ String newId() => Capture.create('').id;
 String dayKey(DateTime value) =>
     '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
 
+/// Calendar-local day arithmetic for wall-clock concepts such as classes.
+/// Unlike adding a 24-hour Duration, this remains local midnight across DST.
+DateTime calendarDay(DateTime value, [int offset = 0]) =>
+    DateTime(value.year, value.month, value.day + offset);
+
 enum TaskStatus { open, inProgress, completed, cancelled }
+
+enum TaskPriority { low, medium, high }
 
 enum FocusOutcome { completed, partial, blocked }
 
@@ -17,6 +24,12 @@ enum ReminderDefault {
 }
 
 enum ReminderOrigin { explicit, defaulted }
+
+/// Why a reminder exists. This lets generated reminders be recalculated
+/// without ever overwriting a time the user explicitly chose.
+enum ReminderBasis { explicit, plannedTime, dueDate }
+
+enum ReminderRecurrence { none, daily, weekly }
 
 class Project {
   const Project({
@@ -64,12 +77,14 @@ class Task {
     this.deadline,
     this.minutes = 25,
     this.notes = '',
+    this.priority = TaskPriority.medium,
     this.status = TaskStatus.open,
     this.checklist = const [],
   });
   final String id, title, area, notes;
   final String? projectId, captureId, entryId, deadline;
   final int minutes;
+  final TaskPriority priority;
   final TaskStatus status;
   final List<ChecklistItem> checklist;
   bool get active =>
@@ -84,6 +99,7 @@ class Task {
     deadline: deadline,
     minutes: minutes,
     notes: notes,
+    priority: priority,
     status: value,
     checklist: checklist,
   );
@@ -97,6 +113,7 @@ class Task {
     deadline: deadline,
     minutes: minutes,
     notes: notes,
+    priority: priority,
     status: status,
     checklist: value,
   );
@@ -109,11 +126,15 @@ class TaskReminder {
     required this.scheduledAt,
     this.deliveryStatus = 'pending',
     this.origin = ReminderOrigin.explicit,
+    this.basis = ReminderBasis.explicit,
+    this.recurrence = ReminderRecurrence.none,
   });
   final String id, taskId;
   final DateTime scheduledAt;
   final String deliveryStatus;
   final ReminderOrigin origin;
+  final ReminderBasis basis;
+  final ReminderRecurrence recurrence;
 }
 
 class QuietHours {
@@ -154,6 +175,72 @@ class PlanBlock {
       end.isAfter(DateTime(day.year, day.month, day.day));
   bool overlaps(PlanBlock other) =>
       start.isBefore(other.end) && end.isAfter(other.start);
+}
+
+enum RecurringScheduleType { classSession, work, meeting, commitment, other }
+
+class RecurringSchedule {
+  const RecurringSchedule({
+    required this.id,
+    required this.title,
+    required this.type,
+    required this.weekday,
+    required this.startTime,
+    required this.endTime,
+    required this.startDate,
+    this.endDate,
+    this.location = '',
+    this.notes = '',
+    this.fixed = true,
+  });
+  final String id, title, startTime, endTime, startDate, location, notes;
+  final String? endDate;
+  final RecurringScheduleType type;
+
+  /// DateTime weekday (Monday=1 … Sunday=7).
+  final int weekday;
+  final bool fixed;
+  bool occursOn(DateTime day, {Set<String> exceptions = const {}}) {
+    final key = dayKey(day);
+    return day.weekday == weekday &&
+        key.compareTo(startDate) >= 0 &&
+        (endDate == null || key.compareTo(endDate!) <= 0) &&
+        !exceptions.contains(key);
+  }
+}
+
+class ScheduleException {
+  const ScheduleException({
+    required this.scheduleId,
+    required this.day,
+    this.cancelled = true,
+    this.startTime,
+    this.endTime,
+    this.movedToDate,
+  });
+  final String scheduleId, day;
+  final bool cancelled;
+  final String? startTime, endTime;
+  final String? movedToDate;
+}
+
+class PlanningPreferences {
+  const PlanningPreferences({
+    this.wakeTime = '07:30',
+    this.bedTime = '23:00',
+    this.transitionMinutes = 15,
+    this.breakMinutes = 15,
+    this.exercisePeriod = 'flexible',
+    this.avoidFocusAfter = '21:30',
+    this.maxFocusMinutes = 90,
+    this.style = 'balanced',
+    this.breakfastWindow = '07:00-09:00',
+    this.lunchWindow = '12:00-14:00',
+    this.dinnerWindow = '18:00-20:00',
+  });
+  final String wakeTime, bedTime, exercisePeriod, avoidFocusAfter, style;
+  final String breakfastWindow, lunchWindow, dinnerWindow;
+  final int transitionMinutes, breakMinutes, maxFocusMinutes;
 }
 
 enum RoutineLevel { minimum, normal, strong }
@@ -263,6 +350,9 @@ class WorkspaceData {
     this.suppressedTaskIds = const [],
     this.quietHours = const QuietHours(),
     this.reminderDefault = ReminderDefault.none,
+    this.recurringSchedules = const [],
+    this.scheduleExceptions = const [],
+    this.planningPreferences = const PlanningPreferences(),
   });
   final bool onboardingCompleted;
   final List<Task> tasks;
@@ -277,4 +367,9 @@ class WorkspaceData {
   final List<String> suppressedTaskIds;
   final QuietHours quietHours;
   final ReminderDefault reminderDefault;
+  final List<RecurringSchedule> recurringSchedules;
+
+  /// schedule id -> excluded ISO dates
+  final List<ScheduleException> scheduleExceptions;
+  final PlanningPreferences planningPreferences;
 }

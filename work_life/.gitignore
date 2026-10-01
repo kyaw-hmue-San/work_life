@@ -51,3 +51,6 @@ app.*.map.json
 # Developer-specific account configuration. Never store server secrets here.
 /config/supabase.local.json
 /config/.env
+/android/key.properties
+*.jks
+*.keystore

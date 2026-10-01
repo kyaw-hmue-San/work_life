@@ -10,18 +10,24 @@ abstract interface class SecureValueStore {
 
 class PlatformSecureValueStore implements SecureValueStore {
   const PlatformSecureValueStore();
-  static const _storage = FlutterSecureStorage(iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock_this_device));
+  static const _storage = FlutterSecureStorage(
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+    ),
+  );
   @override
   Future<String?> read(String key) => _storage.read(key: key);
   @override
-  Future<void> write(String key, String value) => _storage.write(key: key, value: value);
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
   @override
   Future<void> delete(String key) => _storage.delete(key: key);
 }
 
 /// Keeps SDK session writes ordered so a late write cannot race sign-out deletion.
 class SecureAuthStorage extends LocalStorage {
-  SecureAuthStorage(this.namespace, {SecureValueStore? storage}) : storage = storage ?? const PlatformSecureValueStore();
+  SecureAuthStorage(this.namespace, {SecureValueStore? storage})
+    : storage = storage ?? const PlatformSecureValueStore();
   final String namespace;
   final SecureValueStore storage;
   final problem = ValueNotifier<bool>(false);
@@ -88,12 +94,10 @@ class SecurePkceStorage extends GotrueAsyncStorage {
   final String namespace;
   String _key(String key) => 'work_life.$namespace.pkce.$key';
   @override
-  Future<String?> getItem({required String key}) =>
-      storage.read(_key(key));
+  Future<String?> getItem({required String key}) => storage.read(_key(key));
   @override
   Future<void> setItem({required String key, required String value}) =>
       storage.write(_key(key), value);
   @override
-  Future<void> removeItem({required String key}) =>
-      storage.delete(_key(key));
+  Future<void> removeItem({required String key}) => storage.delete(_key(key));
 }

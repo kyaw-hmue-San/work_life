@@ -1,13 +1,36 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import 'capture.dart';
 import 'capture_repository.dart';
 import 'inbox_model.dart';
+import '../ai/capture_assistant.dart';
+import '../ai/aimlapi_client.dart';
+import '../ai/ai_schedule_screen.dart';
+import '../workspace/workspace_model.dart';
+
+typedef ScheduleImagePicker = Future<XFile?> Function();
+typedef ScheduleAiClientFactory = AimlApiClient Function();
 
 class InboxScreen extends StatefulWidget {
-  const InboxScreen({super.key, required this.repository, this.onOpenCapture});
+  const InboxScreen({
+    super.key,
+    required this.repository,
+    this.onOpenCapture,
+    this.workspaceModel,
+    this.onLocalChange,
+    this.scheduleImagePicker,
+    this.scheduleAiClientFactory,
+  });
   final CaptureRepository repository;
   final ValueChanged<Capture>? onOpenCapture;
+  final WorkspaceModel? workspaceModel;
+  final Future<void> Function()? onLocalChange;
+  final ScheduleImagePicker? scheduleImagePicker;
+  final ScheduleAiClientFactory? scheduleAiClientFactory;
 
   @override
   State<InboxScreen> createState() => _InboxScreenState();
@@ -17,6 +40,8 @@ class _InboxScreenState extends State<InboxScreen> {
   late final InboxModel model;
   final draft = TextEditingController();
   final search = TextEditingController();
+  final assistant = const CaptureAssistant();
+  bool importingSchedule = false;
 
   @override
   void initState() {
@@ -44,8 +69,137 @@ class _InboxScreenState extends State<InboxScreen> {
     draft.clear();
     search.clear();
     FocusScope.of(context).unfocus();
+    final callback = widget.onLocalChange;
+    if (callback != null) unawaited(callback());
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text('Saved on this device')));
+  }
+
+  Future<void> importScheduleImage() async {
+    if (importingSchedule) return;
+    setState(() => importingSchedule = true);
+    final selectionTimer = Stopwatch()..start();
+    XFile? image;
+    try {
+      image =
+          await (widget.scheduleImagePicker?.call() ??
+              ImagePicker().pickImage(
+                source: ImageSource.gallery,
+                maxWidth: 2048,
+                maxHeight: 2048,
+                imageQuality: 88,
+              ));
+    } catch (_) {
+      if (mounted) {
+        setState(() => importingSchedule = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Couldn’t open that image. Check photo access and try again.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    if (image == null || !mounted) {
+      if (mounted) setState(() => importingSchedule = false);
+      return;
+    }
+    if (kDebugMode) {
+      debugPrint(
+        '[WORK_LIFE_IMPORT] image selected and preprocessed in ${selectionTimer.elapsedMilliseconds}ms',
+      );
+    }
+    final client = widget.scheduleAiClientFactory?.call() ?? AimlApiClient();
+    var dialogOpen = false, cancelled = false;
+    void cancel() {
+      cancelled = true;
+      dialogOpen = false;
+      client.dispose();
+    }
+
+    if (!client.configured) {
+      client.dispose();
+      if (!mounted) return;
+      setState(() => importingSchedule = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI schedule import is not enabled in this build.'),
+        ),
+      );
+      return;
+    }
+    dialogOpen = true;
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _ScheduleImportProgressDialog(
+          onCancel: () {
+            cancel();
+            Navigator.of(context).pop();
+          },
+        ),
+      ),
+    );
+    try {
+      final readTimer = Stopwatch()..start();
+      final bytes = await image.readAsBytes();
+      if (kDebugMode) {
+        debugPrint(
+          '[WORK_LIFE_IMPORT] read ${bytes.length} bytes in ${readTimer.elapsedMilliseconds}ms',
+        );
+      }
+      if (cancelled) return;
+      final result = await client.analyzeScheduleImage(bytes);
+      if (!mounted || cancelled) return;
+      if (dialogOpen) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      final workspace = widget.workspaceModel;
+      if (workspace == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Open schedule import from the Work Life workspace.'),
+          ),
+        );
+        return;
+      }
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute<bool>(
+          builder: (_) => AiScheduleProposalScreen(
+            model: workspace,
+            proposal: result,
+            title: 'Review imported schedule',
+            showRecurringSave: true,
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted && !cancelled) {
+        if (dialogOpen) {
+          dialogOpen = false;
+          Navigator.of(context, rootNavigator: true).pop();
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${error is AiServiceException ? error.message : 'AI could not read that schedule image.'} Your image and existing data are safe.',
+            ),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: importScheduleImage,
+            ),
+          ),
+        );
+      }
+    } finally {
+      client.dispose();
+      if (mounted) setState(() => importingSchedule = false);
+    }
   }
 
   void openCapture(Capture capture) {
@@ -113,6 +267,8 @@ class _InboxScreenState extends State<InboxScreen> {
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 720),
               child: ListView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
                 padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
                 children: [
                   Text(
@@ -150,6 +306,18 @@ class _InboxScreenState extends State<InboxScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
+                  if (assistant.suggest(draft.text) case final suggestion?)
+                    Card(
+                      elevation: 0,
+                      color: theme.colorScheme.secondaryContainer,
+                      child: ListTile(
+                        leading: const Icon(Icons.auto_awesome_outlined),
+                        title: Text('Quick suggestion · ${suggestion.kind}'),
+                        subtitle: Text(suggestion.prompt),
+                      ),
+                    ),
+                  if (assistant.suggest(draft.text) != null)
+                    const SizedBox(height: 8),
                   if (model.saveError != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
@@ -173,6 +341,21 @@ class _InboxScreenState extends State<InboxScreen> {
                     label: Padding(
                       padding: const EdgeInsets.all(12),
                       child: Text(model.saving ? 'Saving…' : 'Save capture'),
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: model.saving || importingSchedule
+                        ? null
+                        : importScheduleImage,
+                    icon: Icon(
+                      importingSchedule
+                          ? Icons.hourglass_top
+                          : Icons.image_search_outlined,
+                    ),
+                    label: Text(
+                      importingSchedule
+                          ? 'Importing schedule…'
+                          : 'Import a schedule image',
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -288,4 +471,59 @@ class _InboxScreenState extends State<InboxScreen> {
       );
     },
   );
+}
+
+class _ScheduleImportProgressDialog extends StatefulWidget {
+  const _ScheduleImportProgressDialog({required this.onCancel});
+  final VoidCallback onCancel;
+
+  @override
+  State<_ScheduleImportProgressDialog> createState() =>
+      _ScheduleImportProgressDialogState();
+}
+
+class _ScheduleImportProgressDialogState
+    extends State<_ScheduleImportProgressDialog> {
+  Timer? timer;
+  int seconds = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => seconds++);
+    });
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final message = seconds < 4
+        ? 'Preparing the image…'
+        : seconds < 10
+        ? 'Finding classes and times…'
+        : seconds < 20
+        ? 'Preparing your editable timetable…'
+        : 'This is taking longer than usual. You can cancel and retry with a clearer image.';
+    return AlertDialog(
+      title: const Text('Reading your schedule'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const LinearProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(message),
+        ],
+      ),
+      actions: [
+        TextButton(onPressed: widget.onCancel, child: const Text('Cancel')),
+      ],
+    );
+  }
 }

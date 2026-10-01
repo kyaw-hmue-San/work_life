@@ -72,6 +72,34 @@ void main() {
   });
 
   test(
+    'first future reminder requests undecided permission contextually',
+    () async {
+      final driver = FakeNotifications()
+        ..state = NotificationPermission.notDetermined
+        ..stateAfterRequest = NotificationPermission.allowed;
+      final service = ReminderNotifications(driver, now: () => now);
+      final repo = workspace();
+      await service.reconcile(service.attach('guest'), repo);
+      expect(driver.permissionRequests, 1);
+      expect(driver.alerts, hasLength(1));
+      expect(repo.reminders.single.deliveryStatus, 'scheduled');
+    },
+  );
+
+  test(
+    'does not request undecided permission without a future reminder',
+    () async {
+      final driver = FakeNotifications()
+        ..state = NotificationPermission.notDetermined;
+      final service = ReminderNotifications(driver, now: () => now);
+      final repo = MemoryWorkspace();
+      await service.reconcile(service.attach('guest'), repo);
+      expect(driver.permissionRequests, 0);
+      expect(driver.alerts, isEmpty);
+    },
+  );
+
+  test(
     'failure leaves saved intent and successful retry repairs scheduling',
     () async {
       final driver = FakeNotifications()..failSchedule = true;
@@ -216,7 +244,10 @@ void main() {
     );
     final lease = service.attach('guest');
     await service.reconcile(lease, repo);
-    expect(driver.scheduledTimes.values.single, DateTime(2030, 1, 2, 7).toUtc());
+    expect(
+      driver.scheduledTimes.values.single,
+      DateTime(2030, 1, 2, 7).toUtc(),
+    );
     expect(repo.reminders.single.scheduledAt, localReminder.toUtc());
     expect(driver.schedules, 1);
 
@@ -255,48 +286,57 @@ void main() {
     expect(repo.reminders.single.origin, ReminderOrigin.defaulted);
     final lease = service.attach('guest');
     await service.reconcile(lease, repo);
-    expect(driver.scheduledTimes.values.single, DateTime(2030, 1, 2, 7).toUtc());
+    expect(
+      driver.scheduledTimes.values.single,
+      DateTime(2030, 1, 2, 7).toUtc(),
+    );
   });
 
-  test('reconciliation cancels notifications after local data deletion', () async {
-    final driver = FakeNotifications();
-    final service = ReminderNotifications(driver, now: () => now);
-    final repo = workspace();
-    final lease = service.attach('guest');
-    await service.reconcile(lease, repo);
-    expect(driver.alerts, hasLength(1));
-    await repo.clearLocalData();
-    await service.reconcile(lease, repo);
-    expect(driver.alerts, isEmpty);
-    expect(driver.active, isEmpty);
-  });
+  test(
+    'reconciliation cancels notifications after local data deletion',
+    () async {
+      final driver = FakeNotifications();
+      final service = ReminderNotifications(driver, now: () => now);
+      final repo = workspace();
+      final lease = service.attach('guest');
+      await service.reconcile(lease, repo);
+      expect(driver.alerts, hasLength(1));
+      await repo.clearLocalData();
+      await service.reconcile(lease, repo);
+      expect(driver.alerts, isEmpty);
+      expect(driver.active, isEmpty);
+    },
+  );
 
-  test('repeated snooze replacement keeps one scheduled notification', () async {
-    final driver = FakeNotifications();
-    final service = ReminderNotifications(driver, now: () => now);
-    final repo = workspace();
-    final lease = service.attach('guest');
-    await service.reconcile(lease, repo);
-    final reminder = repo.reminders.single;
-    await repo.saveReminder(
-      TaskReminder(
-        id: reminder.id,
-        taskId: reminder.taskId,
-        scheduledAt: now.add(const Duration(hours: 2)),
-      ),
-    );
-    await service.reconcile(lease, repo);
-    expect(driver.alerts, hasLength(1));
-    expect(driver.schedules, 2);
-    await repo.saveReminder(
-      TaskReminder(
-        id: reminder.id,
-        taskId: reminder.taskId,
-        scheduledAt: now.add(const Duration(hours: 3)),
-      ),
-    );
-    await service.reconcile(lease, repo);
-    expect(driver.alerts, hasLength(1));
-    expect(driver.schedules, 3);
-  });
+  test(
+    'repeated snooze replacement keeps one scheduled notification',
+    () async {
+      final driver = FakeNotifications();
+      final service = ReminderNotifications(driver, now: () => now);
+      final repo = workspace();
+      final lease = service.attach('guest');
+      await service.reconcile(lease, repo);
+      final reminder = repo.reminders.single;
+      await repo.saveReminder(
+        TaskReminder(
+          id: reminder.id,
+          taskId: reminder.taskId,
+          scheduledAt: now.add(const Duration(hours: 2)),
+        ),
+      );
+      await service.reconcile(lease, repo);
+      expect(driver.alerts, hasLength(1));
+      expect(driver.schedules, 2);
+      await repo.saveReminder(
+        TaskReminder(
+          id: reminder.id,
+          taskId: reminder.taskId,
+          scheduledAt: now.add(const Duration(hours: 3)),
+        ),
+      );
+      await service.reconcile(lease, repo);
+      expect(driver.alerts, hasLength(1));
+      expect(driver.schedules, 3);
+    },
+  );
 }

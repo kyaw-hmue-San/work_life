@@ -28,7 +28,11 @@ void main() {
   });
 
   test('same-day quiet hours delay only reminders inside the period', () {
-    const quiet = QuietHours(enabled: true, startMinute: 9 * 60, endMinute: 17 * 60);
+    const quiet = QuietHours(
+      enabled: true,
+      startMinute: 9 * 60,
+      endMinute: 17 * 60,
+    );
     expect(
       effectiveReminderTime(DateTime(2030, 1, 1, 9), quiet),
       DateTime(2030, 1, 1, 17).toUtc(),

@@ -4,6 +4,7 @@ import 'package:work_life/notifications/notification_driver.dart';
 
 class FakeNotifications implements NotificationDriver {
   NotificationPermission state = NotificationPermission.allowed;
+  NotificationPermission? stateAfterRequest;
   bool failSchedule = false, failCancel = false;
   int permissionRequests = 0, schedules = 0, resets = 0;
   final alerts = <int, PendingAlert>{};
@@ -14,7 +15,10 @@ class FakeNotifications implements NotificationDriver {
 
   @override
   Future<NotificationPermission> permission({bool request = false}) async {
-    if (request) permissionRequests++;
+    if (request) {
+      permissionRequests++;
+      state = stateAfterRequest ?? state;
+    }
     return state;
   }
 

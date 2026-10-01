@@ -115,6 +115,11 @@ void main() {
       200,
       scrollable: find.byType(Scrollable).first,
     );
+    await Scrollable.ensureVisible(
+      tester.element(find.text(text)),
+      alignment: 0.5,
+    );
+    await tester.pump();
     await tester.tap(find.text(text));
     await tester.pumpAndSettle();
   }
@@ -241,13 +246,15 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tap(tester, 'Use offline guest workspace');
     await tap(tester, 'Skip setup');
     accounts.setUser('alice');
     await tester.pumpAndSettle();
     expect(find.text('Welcome to Work Life'), findsOneWidget);
     accounts.setUser(null);
     await tester.pumpAndSettle();
-    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.text('Sign in to your real account.'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
 }

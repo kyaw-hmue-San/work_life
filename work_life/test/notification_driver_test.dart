@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:work_life/notifications/notification_driver.dart';
 
 void main() {
@@ -10,6 +11,7 @@ void main() {
   final calls = <MethodCall>[];
   var blockedChannel = false;
   setUp(() {
+    SharedPreferences.setMockInitialValues({});
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     AndroidFlutterLocalNotificationsPlugin.registerWith();
     calls.clear();
@@ -79,6 +81,46 @@ void main() {
       expect(
         await LocalNotificationDriver().permission(),
         NotificationPermission.blocked,
+      );
+    },
+  );
+
+  test(
+    'iOS reports undecided, requests once, then schedules as allowed',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      IOSFlutterLocalNotificationsPlugin.registerWith();
+      var enabled = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method == 'requestPermissions') {
+              enabled = true;
+              return true;
+            }
+            if (call.method == 'checkPermissions') {
+              return {
+                'isEnabled': enabled,
+                'isSoundEnabled': enabled,
+                'isAlertEnabled': enabled,
+                'isBadgeEnabled': false,
+                'isProvisionalEnabled': false,
+                'isCriticalEnabled': false,
+                'isProvidesAppNotificationSettingsEnabled': false,
+                'isCarPlayEnabled': false,
+              };
+            }
+            return true;
+          });
+      final driver = LocalNotificationDriver();
+      expect(await driver.permission(), NotificationPermission.notDetermined);
+      expect(
+        await driver.permission(request: true),
+        NotificationPermission.allowed,
+      );
+      expect(
+        calls.where((call) => call.method == 'requestPermissions'),
+        hasLength(1),
       );
     },
   );

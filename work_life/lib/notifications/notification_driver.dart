@@ -1,8 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 
-enum NotificationPermission { allowed, blocked, unsupported }
+enum NotificationPermission { notDetermined, allowed, blocked, unsupported }
 
 class PendingAlert {
   const PendingAlert(this.id, this.payload);
@@ -24,6 +25,8 @@ class LocalNotificationDriver implements NotificationDriver {
   final FlutterLocalNotificationsPlugin plugin =
       FlutterLocalNotificationsPlugin();
   bool _ready = false;
+  static const _permissionRequestedKey =
+      'work_life.notification_permission_requested';
   bool get supported =>
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.android ||
@@ -58,7 +61,14 @@ class LocalNotificationDriver implements NotificationDriver {
           AndroidFlutterLocalNotificationsPlugin
         >();
     if (android != null) {
-      if (request) await android.requestNotificationsPermission();
+      final preferences = await SharedPreferences.getInstance();
+      var previouslyRequested =
+          preferences.getBool(_permissionRequestedKey) ?? false;
+      if (request) {
+        await android.requestNotificationsPermission();
+        previouslyRequested = true;
+        preferences.setBool(_permissionRequestedKey, true);
+      }
       final channels = await android.getNotificationChannels();
       if (channels?.any(
             (channel) =>
@@ -68,21 +78,32 @@ class LocalNotificationDriver implements NotificationDriver {
           true) {
         return NotificationPermission.blocked;
       }
-      return await android.areNotificationsEnabled() == true
-          ? NotificationPermission.allowed
-          : NotificationPermission.blocked;
+      if (await android.areNotificationsEnabled() == true) {
+        return NotificationPermission.allowed;
+      }
+      return previouslyRequested
+          ? NotificationPermission.blocked
+          : NotificationPermission.notDetermined;
     }
     final ios = plugin
         .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin
         >()!;
+    final preferences = await SharedPreferences.getInstance();
+    var previouslyRequested =
+        preferences.getBool(_permissionRequestedKey) ?? false;
     if (request) {
       await ios.requestPermissions(alert: true, sound: true, badge: false);
+      previouslyRequested = true;
+      preferences.setBool(_permissionRequestedKey, true);
     }
     final status = await ios.checkPermissions();
-    return status?.isEnabled == true
-        ? NotificationPermission.allowed
-        : NotificationPermission.blocked;
+    if (status?.isEnabled == true || status?.isProvisionalEnabled == true) {
+      return NotificationPermission.allowed;
+    }
+    return previouslyRequested
+        ? NotificationPermission.blocked
+        : NotificationPermission.notDetermined;
   }
 
   @override

@@ -46,13 +46,30 @@ For a release build, pass the same two defines to the build command used for the
 
 ## 4. Verify the first sign-in
 
-1. Open **More → Account**.
-2. Test email sign-up and confirm the email on the same device. Then sign in.
+1. Launch the configured app. The account screen appears before any workspace.
+2. Test email sign-up and confirm the email on the same device. Then sign in. A new account should enter onboarding before normal navigation.
 3. Test **Continue with Google** and complete the browser flow. Returning to the app should show the account email.
-4. Sign out, confirm the guest notes return, then sign in as another account and confirm the first account's records are not visible.
+4. Sign out and confirm the account gate returns. Choose the secondary offline guest action only when testing guest isolation, then sign in as another account and confirm the first account's records are not visible.
 5. Test password reset and recovery before treating the setup as ready for a pilot.
 
-The current account slice isolates local databases and stores the Supabase session and PKCE values in platform secure storage. It does not yet provide cloud backup, sync, server-side data ownership, export, or deletion. Those remain separate implementation work.
+## Deploy workspace synchronization
+
+Apply the checked migration before enabling multi-device use:
+
+```sh
+supabase link --project-ref YOUR_PROJECT_REF
+supabase db push
+```
+
+The migration creates `workspaces`, `workspace_records`, the mutation receipt
+table, Row Level Security policies, and `apply_workspace_mutation`. The RPC
+requires `p_workspace_id = auth.uid()`; clients have read access only to their
+owned workspace and no direct write policy on synchronized records.
+
+Each signed-in account uses its own SQLite database and its Supabase user ID as
+the workspace ID. Guest data is never silently adopted. Settings shows sync
+status and manual retry. Apply the migration to every production/staging
+Supabase project before relying on cloud recovery.
 
 ## Troubleshooting
 

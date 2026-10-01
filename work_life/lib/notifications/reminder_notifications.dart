@@ -14,6 +14,7 @@ String reminderDeliveryLabel(String status) => switch (status) {
   'elapsed' => 'Time passed · delivery not confirmed',
   'deferred' => 'Waiting for a device scheduling slot',
   'failed' => 'Device scheduling failed · retry from Today',
+  'permission_required' => 'Permission needed · kept in Today',
   _ => 'Waiting for device scheduling',
 };
 
@@ -95,8 +96,6 @@ class ReminderNotifications extends ChangeNotifier {
         if (generation != _generation) return;
         _reset = false;
       }
-      permission = await driver.permission(request: requestPermission);
-      if (generation != _generation) return;
       final data = await repository.readWorkspace();
       final activeIds = data.tasks
           .where((t) => t.active)
@@ -111,6 +110,20 @@ class ReminderNotifications extends ChangeNotifier {
                   );
               return time == 0 ? a.id.compareTo(b.id) : time;
             });
+      permission = await driver.permission(request: requestPermission);
+      if (generation != _generation) return;
+      // Ask at the moment the user creates their first future reminder. This
+      // is contextual, unlike an unexplained launch-time permission dialog.
+      if (permission == NotificationPermission.notDetermined &&
+          reminders.any(
+            (reminder) => effectiveReminderTime(
+              reminder.scheduledAt,
+              data.quietHours,
+            ).isAfter(now()),
+          )) {
+        permission = await driver.permission(request: true);
+        if (generation != _generation) return;
+      }
       final future = reminders
           .where(
             (r) => effectiveReminderTime(
@@ -183,9 +196,11 @@ class ReminderNotifications extends ChangeNotifier {
         if (!effective.isAfter(now())) {
           status = 'elapsed';
         } else if (permission != NotificationPermission.allowed) {
-          status = permission == NotificationPermission.unsupported
-              ? 'unsupported'
-              : 'blocked';
+          status = switch (permission) {
+            NotificationPermission.unsupported => 'unsupported',
+            NotificationPermission.notDetermined => 'permission_required',
+            _ => 'blocked',
+          };
         } else if (!future.any((r) => r.id == reminder.id)) {
           status = 'deferred';
         } else {
@@ -217,6 +232,7 @@ class ReminderNotifications extends ChangeNotifier {
                     ? 'Device notifications enabled. Some later reminders are waiting; open the app to refresh. Your device may delay alerts.'
                     : 'Device notifications enabled. Your device may delay alerts.',
               NotificationPermission.blocked => 'Device notifications are off. Enable permission or change system settings; reminders remain in Today.',
+              NotificationPermission.notDetermined => 'Enable device notifications when you add a reminder. Your reminders remain in Today.',
               _ => 'Device notifications are supported on Android and iPhone. Reminders remain in Today.',
             };
     } finally {
