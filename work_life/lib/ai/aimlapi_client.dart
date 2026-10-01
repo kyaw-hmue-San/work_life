@@ -27,6 +27,32 @@ class AiServiceException implements Exception {
   String toString() => message;
 }
 
+enum ScheduleImportStage {
+  preparingImage,
+  uploadingAndReading,
+  buildingProposal,
+  ready,
+}
+
+class ScheduleImportProgress {
+  const ScheduleImportProgress({
+    required this.stage,
+    required this.elapsed,
+    this.inputBytes,
+    this.responseBytes,
+    this.serverTiming,
+  });
+
+  final ScheduleImportStage stage;
+  final Duration elapsed;
+  final int? inputBytes, responseBytes;
+  final String? serverTiming;
+}
+
+typedef ScheduleImportProgressCallback = void Function(
+  ScheduleImportProgress progress,
+);
+
 class AimlApiClient {
   static bool get environmentConfigured {
     const proxy = String.fromEnvironment('WORK_LIFE_AI_PROXY_URL');
@@ -43,6 +69,7 @@ class AimlApiClient {
     http.Client? client,
     String? apiKey,
     String? model,
+    String? visionModel,
     String? baseUrl,
     String? proxyUrl,
     bool? allowDirectProvider,
@@ -54,6 +81,13 @@ class AimlApiClient {
            model ??
            const String.fromEnvironment(
              'AIMLAPI_MODEL',
+             defaultValue: 'google/gemini-3-8-flash',
+           ),
+       visionModel =
+           visionModel ??
+           model ??
+           const String.fromEnvironment(
+             'AIMLAPI_VISION_MODEL',
              defaultValue: 'google/gemini-3-8-flash',
            ),
        baseUrl =
@@ -71,7 +105,7 @@ class AimlApiClient {
        _accessToken = accessToken ?? _supabaseAccessToken;
 
   final http.Client _client;
-  final String apiKey, model, baseUrl, proxyUrl;
+  final String apiKey, model, visionModel, baseUrl, proxyUrl;
   final bool allowDirectProvider;
   final Future<String?> Function() _accessToken;
   final Duration requestTimeout;
@@ -115,21 +149,41 @@ class AimlApiClient {
     return AiSuggestionResult(text: text, model: model);
   }
 
-  Future<AiScheduleProposal> analyzeScheduleImage(Uint8List bytes) async {
+  Future<AiScheduleProposal> analyzeScheduleImage(
+    Uint8List bytes, {
+    ScheduleImportProgressCallback? onProgress,
+  }) async {
     if (!configured) throw StateError('AI is not configured.');
     if (bytes.length > 5 * 1024 * 1024) {
       throw ArgumentError('Choose an image smaller than 5 MB.');
     }
-    final timer = Stopwatch()..start();
+    final total = Stopwatch()..start();
+    final encoding = Stopwatch()..start();
+    onProgress?.call(
+      ScheduleImportProgress(
+        stage: ScheduleImportStage.preparingImage,
+        elapsed: total.elapsed,
+        inputBytes: bytes.length,
+      ),
+    );
     final encoded = base64Encode(bytes);
+    encoding.stop();
     if (kDebugMode) {
       debugPrint(
-        '[WORK_LIFE_IMPORT] encoded ${bytes.length} bytes in ${timer.elapsedMilliseconds}ms',
+        '[WORK_LIFE_IMPORT] image encoding: ${encoding.elapsedMilliseconds}ms; input: ${bytes.length} bytes; base64: ${encoded.length} chars',
       );
     }
     try {
+      onProgress?.call(
+        ScheduleImportProgress(
+          stage: ScheduleImportStage.uploadingAndReading,
+          elapsed: total.elapsed,
+          inputBytes: bytes.length,
+        ),
+      );
+      final request = Stopwatch()..start();
       final response = await _post('schedule_image', {
-        'model': model,
+        'model': visionModel,
         'temperature': 0.1,
         'messages': [
           {
@@ -151,14 +205,26 @@ class AimlApiClient {
           },
         ],
       });
+      request.stop();
+      final serverTiming = response.headers['server-timing'];
       if (kDebugMode) {
         debugPrint(
-          '[WORK_LIFE_IMPORT] provider response in ${timer.elapsedMilliseconds}ms status=${response.statusCode}',
+          '[WORK_LIFE_IMPORT] upload + backend + provider: ${request.elapsedMilliseconds}ms; response: ${response.bodyBytes.length} bytes; status: ${response.statusCode}; server-timing: ${serverTiming ?? 'unavailable'}',
         );
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw _failure(response);
       }
+      onProgress?.call(
+        ScheduleImportProgress(
+          stage: ScheduleImportStage.buildingProposal,
+          elapsed: total.elapsed,
+          inputBytes: bytes.length,
+          responseBytes: response.bodyBytes.length,
+          serverTiming: serverTiming,
+        ),
+      );
+      final parsing = Stopwatch()..start();
       final body = jsonDecode(response.body);
       final choices = body is Map ? body['choices'] : null;
       final text = choices is List && choices.isNotEmpty
@@ -170,11 +236,21 @@ class AimlApiClient {
         throw const FormatException('AI returned no schedule proposal.');
       }
       final proposal = const AiProposalParser().schedule(text);
+      parsing.stop();
       if (kDebugMode) {
         debugPrint(
-          '[WORK_LIFE_IMPORT] parsed ${proposal.events.length} events in ${timer.elapsedMilliseconds}ms total',
+          '[WORK_LIFE_IMPORT] response parsing + proposal: ${parsing.elapsedMilliseconds}ms; events: ${proposal.events.length}; total after image read: ${total.elapsedMilliseconds}ms',
         );
       }
+      onProgress?.call(
+        ScheduleImportProgress(
+          stage: ScheduleImportStage.ready,
+          elapsed: total.elapsed,
+          inputBytes: bytes.length,
+          responseBytes: response.bodyBytes.length,
+          serverTiming: serverTiming,
+        ),
+      );
       return proposal;
     } on TimeoutException {
       throw const AiServiceException(
@@ -195,18 +271,127 @@ class AimlApiClient {
     String input, {
     DateTime? now,
     List<String> existingAreas = const [],
+    Map<String, Object?> planningContext = const {},
   }) async {
     final localNow = (now ?? DateTime.now()).toLocal();
     final result = await _complete(
-      system: '''Classify one capture and return JSON only. Shape: {"type":"capture_proposal","kind":"standalone_task|project|routine|reminder|planning_request","task":{"title":"","area":null,"priority":"low|medium|high","minutes":25,"deadline":"YYYY-MM-DD or null","reminder":"ISO-8601 with offset or null","checklist":[]},"project":{"title":"","description":"","area":null,"tasks":[]},"routine":{"title":"","area":null,"window":"human-readable days/time","minimum":"smallest version","normal":"","strong":""},"planningDate":"YYYY-MM-DD or null","questions":[]}. Include only the object relevant to kind. A single independently completable action is standalone_task. Two or more distinct actions, even in one sentence, are a project with one ordered task per action; preserve sequence and dependencies. For example, traveling to collect a person and then collecting a parcel are separate ordered actions, not one vague task. A repeating behavior is routine, an explicit request to alert the user is reminder, and a request to arrange time is planning_request. Understand everyday life broadly: commuting, travel, errands, shopping, pickups, appointments, cleaning, laundry, cooking, personal care, preparation, social/family time, breaks and rest are meaningful activities. Choose an exact existing Life Area when it fits semantically and case-insensitively. Suggest one concise reusable new area only when none fits; never create synonyms or near-duplicates. Preserve intent, resolve relative dates only from the supplied local timestamp, never invent a date, and ask questions only for genuine uncertainty.''',
+      system: '''Classify one natural-language capture and return JSON only. Shape: {"type":"capture_proposal","kind":"standalone_task|project|routine|reminder|planning_request","task":{"title":"","area":null,"group":null,"details":"","priority":"low|medium|high","minutes":25,"deadline":"YYYY-MM-DD or null","plannedStart":"ISO-8601 with offset or null","reminder":"ISO-8601 with offset or null","checklist":[]},"project":{"title":"","description":"","area":null,"tasks":[]},"routine":{"title":"","area":null,"window":"human-readable days/time","minimum":"smallest version","normal":"","strong":""},"planningDate":"YYYY-MM-DD or null","questions":[]}.
+
+Act as a careful real-life planning assistant, not a keyword splitter. Identify every independently completable outcome, preserve sequence and dependencies, and use a concise group label such as Birthday, Immigration or Parcel when one capture contains different life outcomes. Use details for useful reasoning, options or constraints; checklist is for concrete preparation. Recommendations must be specific enough to help but conditional on known preferences—ask about budget, tastes, dietary needs or other missing facts instead of inventing them.
+
+A single action is standalone_task. Multiple actions are a project. A repeating behavior is routine. An explicit alert request is reminder. A request to arrange time is planning_request. Understand commuting, travel, errands, shopping, pickups, appointments, household work, preparation, social/family time, personal care, recovery and rest.
+
+Time management: use the supplied calendar, weekly commitments and preferences. Treat explicit dates as hard anchors. Work backward for preparation tasks. Account for travel, opening hours, dependencies and buffers. Set deadline only when supported by the capture or answers. Set plannedStart only when an exact feasible time is supported; otherwise ask. Set reminder when an important known deadline/time makes it useful, but never fabricate a time. If a legal/administrative deadline is missing, ask for it and mark that question as important. Never silently assume a business is open.
+
+Choose an exact existing Life Area when suitable, case-insensitively. Suggest one concise new area only when none fits; do not make synonyms. Preserve the original meaning, resolve relative dates from localNow, and ask short actionable questions only where the answers materially change dates, recommendations or scheduling.''',
       user: jsonEncode({
         'localNow': localNow.toIso8601String(),
         'capture': input,
         'existingAreas': existingAreas,
+        'planningContext': planningContext,
       }),
     );
     return const AiProposalParser().capture(result.text);
   }
+
+  Future<AiProjectProposal> refineCaptureProject({
+    required String originalInput,
+    required AiProjectProposal proposal,
+    required Map<String, String> answers,
+    required List<String> existingAreas,
+    Map<String, Object?> planningContext = const {},
+    DateTime? now,
+  }) async {
+    final result = await _complete(
+      system: '''Return JSON only as a project_proposal: {"type":"project_proposal","project":{"title":"","description":"","area":null,"tasks":[{"taskId":null,"operation":"add","title":"","area":null,"group":null,"details":"","priority":"low|medium|high","minutes":25,"deadline":"YYYY-MM-DD or null","plannedStart":"ISO-8601 with offset or null","reminder":"ISO-8601 with offset or null","checklist":[]}]},"questions":[]}.
+
+Refine the existing editable proposal using the user's answers. Preserve correct work and ordering; change only what the answers affect. Group distinct outcomes clearly. Turn known dates into realistic deadlines, calendar starts and useful reminders only when the exact time is supported. Work backward from hard dates, include preparation/travel/checklists, respect existing calendar blocks and preferences, and never invent opening hours, preferences, locations or dates. Keep unresolved material questions in questions. Recommendations should be helpful but conditional rather than pretending to know the user's tastes.''',
+      user: jsonEncode({
+        'localNow': (now ?? DateTime.now()).toLocal().toIso8601String(),
+        'originalCapture': originalInput,
+        'existingAreas': existingAreas,
+        'planningContext': planningContext,
+        'currentProposal': _projectPayload(proposal),
+        'answers': answers,
+      }),
+    );
+    return const AiProposalParser().project(result.text);
+  }
+
+  Future<AiCaptureProposal> refineCapture({
+    required String originalInput,
+    required AiCaptureProposal proposal,
+    required Map<String, String> answers,
+    required List<String> existingAreas,
+    Map<String, Object?> planningContext = const {},
+    DateTime? now,
+  }) async {
+    final result = await _complete(
+      system: '''Return JSON only as a capture_proposal using this exact shape: {"type":"capture_proposal","kind":"standalone_task|routine|reminder","task":{"title":"","area":null,"group":null,"details":"","priority":"low|medium|high","minutes":25,"deadline":"YYYY-MM-DD or null","plannedStart":"ISO-8601 with offset or null","reminder":"ISO-8601 with offset or null","checklist":[]},"routine":{"title":"","area":null,"window":"","minimum":"","normal":"","strong":""},"questions":[]}.
+
+Refine the current editable proposal using the user's answers. Preserve correct user edits and the original meaning. Use exact dates and times only when supported. Consider the supplied calendar, recurring commitments, travel, preparation, opening hours and transition buffers. Never invent preferences or deadlines. Keep any unresolved material questions in questions. Keep the same proposal kind; if an answer adds supporting steps, put them in the task checklist.''',
+      user: jsonEncode({
+        'localNow': (now ?? DateTime.now()).toLocal().toIso8601String(),
+        'originalCapture': originalInput,
+        'existingAreas': existingAreas,
+        'planningContext': planningContext,
+        'currentProposal': _capturePayload(proposal),
+        'answers': answers,
+      }),
+    );
+    return const AiProposalParser().capture(result.text);
+  }
+
+  Map<String, Object?> _capturePayload(AiCaptureProposal proposal) => {
+    'kind': proposal.kind.name,
+    if (proposal.task case final task?)
+      'task': {
+        'title': task.title,
+        'area': task.area,
+        'details': task.details,
+        'priority': task.priority,
+        'minutes': task.minutes,
+        'deadline': task.deadline,
+        'plannedStart': task.plannedStart,
+        'reminder': task.reminder,
+        'checklist': task.checklist,
+      },
+    if (proposal.routine case final routine?)
+      'routine': {
+        'title': routine.title,
+        'area': routine.area,
+        'window': routine.window,
+        'minimum': routine.minimum,
+        'normal': routine.normal,
+        'strong': routine.strong,
+      },
+    'questions': proposal.questions,
+  };
+
+  Map<String, Object?> _projectPayload(AiProjectProposal proposal) => {
+    'title': proposal.title,
+    'description': proposal.description,
+    'area': proposal.area,
+    'tasks': proposal.tasks
+        .map(
+          (task) => {
+            'taskId': task.taskId,
+            'title': task.title,
+            'area': task.area,
+            'group': task.group,
+            'details': task.details,
+            'priority': task.priority,
+            'minutes': task.minutes,
+            'deadline': task.deadline,
+            'plannedStart': task.plannedStart,
+            'reminder': task.reminder,
+            'checklist': task.checklist,
+            'included': task.included,
+          },
+        )
+        .toList(),
+    'questions': proposal.questions,
+  };
 
   Future<AiScheduleProposal> planDay(String context) async {
     final result = await _complete(

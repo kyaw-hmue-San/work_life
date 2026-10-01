@@ -4,7 +4,7 @@ Routine Minimum / Normal / Strong levels are implemented locally (12 September 2
 
 Minimal first-run onboarding is implemented (10 September 2026): Welcome → Life Areas → Reminder Preference. New workspaces see setup; existing databases migrate as returning users. Skip preserves settings; workspace reset returns to Welcome. See [Onboarding behavior and persistence](docs/ONBOARDING.md).
 
-Export and Delete Local Data (9 September 2026): implemented for the current workspace in More → Settings → Data. Version 1 JSON includes persisted product records and settings, excluding authentication and device bookkeeping. Confirmed reset cancels notifications before transactional cleanup, retains account identity, resets preferences, and refreshes Inbox. See [Local data format and reset policy](docs/LOCAL_DATA.md). Native file sharing and notifications still need physical-device acceptance.
+Backup, readable export, and Delete Local Data are available for the current workspace in More → Settings → Data. Versioned JSON remains the restore format; Markdown is a readable projects/tasks/schedule report, and task CSV is intended for spreadsheets. Authentication and device bookkeeping are excluded. Confirmed reset cancels notifications before transactional cleanup, retains account identity, resets preferences, and refreshes Inbox. See [Local data format and reset policy](docs/LOCAL_DATA.md). Native sharing and delivered notifications still need physical-device acceptance.
 
 Flutter workspace for a mobile app that helps people capture ideas, keep commitments, plan realistically, focus, and protect health, relationships, and rest. Product name is undecided. The owner chose Flutter for Android and iPhone, with learning as a project goal.
 
@@ -69,3 +69,5 @@ Run automated checks with:
 For Android device setup, APK builds, and notification acceptance, use [Android setup](docs/ANDROID_SETUP.md). For email/Google provider and callback setup, use [Supabase/Google setup](docs/SUPABASE_GOOGLE_SETUP.md). The generated web/Windows/Linux scaffolds are not supported by the current storage implementation. Physical iPhone signing still requires your Apple development team.
 
 Production AI calls use the authenticated Supabase Edge Function in `supabase/functions/ai-proxy`; provider credentials remain server-side. Direct AIMLAPI access is disabled in release builds even if a key is accidentally supplied. Deploy the function and set its `AIMLAPI_KEY` secret before production validation.
+
+`AIMLAPI_VISION_MODEL` may select a fast multimodal model for schedule images independently of the text model. Debug imports print measured picker/native resize, image read, Base64 encoding, network/backend/provider, parsing, render, byte counts, and Edge Function `Server-Timing`. Redeploy `supabase/functions/ai-proxy` after changes so provider timing is available.

@@ -11,6 +11,126 @@ class LocalDataExport {
   final WorkspaceRepository repository;
   final DateTime Function() now;
 
+  Future<String> buildMarkdown() async {
+    final snapshot = await repository.readExportSnapshot();
+    final workspace = snapshot.workspace;
+    final projects = _sorted(workspace.projects, (value) => value.id);
+    final tasks = _sorted(workspace.tasks, (value) => value.id);
+    final plans = [...workspace.plans]
+      ..sort((a, b) => a.start.compareTo(b.start));
+    final buffer = StringBuffer()
+      ..writeln('# Work Life report')
+      ..writeln()
+      ..writeln('Exported: ${now().toLocal().toIso8601String()}')
+      ..writeln()
+      ..writeln('## Summary')
+      ..writeln()
+      ..writeln('- Projects: ${projects.length}')
+      ..writeln('- Tasks: ${tasks.length}')
+      ..writeln(
+        '- Completed tasks: ${tasks.where((task) => task.status == TaskStatus.completed).length}',
+      )
+      ..writeln('- Planner blocks: ${plans.length}')
+      ..writeln('- Routines: ${workspace.routines.length}')
+      ..writeln('- Captures: ${snapshot.captures.length}');
+
+    buffer
+      ..writeln()
+      ..writeln('## Projects');
+    if (projects.isEmpty) buffer.writeln('\n_No projects._');
+    for (final project in projects) {
+      buffer
+        ..writeln()
+        ..writeln('### ${_markdown(project.title)}')
+        ..writeln()
+        ..writeln('Area: ${_markdown(project.area)}');
+      if (project.description.trim().isNotEmpty) {
+        buffer.writeln('\n${_markdown(project.description)}');
+      }
+      final projectTasks = tasks.where((task) => task.projectId == project.id);
+      for (final task in projectTasks) {
+        buffer.writeln(_taskMarkdown(task));
+      }
+    }
+
+    buffer
+      ..writeln()
+      ..writeln('## Tasks without a project');
+    final unassigned = tasks.where((task) => task.projectId == null).toList();
+    if (unassigned.isEmpty) buffer.writeln('\n_No unassigned tasks._');
+    for (final task in unassigned) {
+      buffer.writeln(_taskMarkdown(task));
+    }
+
+    buffer
+      ..writeln()
+      ..writeln('## Planner');
+    if (plans.isEmpty) buffer.writeln('\n_No planner blocks._');
+    for (final plan in plans) {
+      buffer.writeln(
+        '- ${plan.start.toLocal().toIso8601String()} · ${_markdown(plan.title)} (${plan.minutes} min, ${_markdown(plan.area)})',
+      );
+    }
+
+    buffer
+      ..writeln()
+      ..writeln('## Recurring schedule');
+    if (workspace.recurringSchedules.isEmpty) {
+      buffer.writeln('\n_No recurring commitments._');
+    }
+    for (final schedule in workspace.recurringSchedules) {
+      buffer.writeln(
+        '- ${_weekday(schedule.weekday)} ${schedule.startTime}–${schedule.endTime} · ${_markdown(schedule.title)}${schedule.location.trim().isEmpty ? '' : ' · ${_markdown(schedule.location)}'}',
+      );
+    }
+
+    buffer
+      ..writeln()
+      ..writeln('## Routines');
+    if (workspace.routines.isEmpty) buffer.writeln('\n_No routines._');
+    for (final routine in workspace.routines) {
+      buffer.writeln(
+        '- ${_markdown(routine.title)} · ${_markdown(routine.window)} · minimum: ${_markdown(routine.alternative)}',
+      );
+    }
+    return buffer.toString().trimRight();
+  }
+
+  Future<String> buildTasksCsv() async {
+    final workspace = (await repository.readExportSnapshot()).workspace;
+    final projectNames = {
+      for (final project in workspace.projects) project.id: project.title,
+    };
+    final rows = <List<Object?>>[
+      [
+        'Title',
+        'Status',
+        'Priority',
+        'Area',
+        'Project',
+        'Deadline',
+        'Minutes',
+        'Notes',
+        'Checklist',
+      ],
+      for (final task in _sorted(workspace.tasks, (value) => value.id))
+        [
+          task.title,
+          task.status.name,
+          task.priority.name,
+          task.area,
+          projectNames[task.projectId] ?? '',
+          task.deadline ?? '',
+          task.minutes,
+          task.notes,
+          task.checklist
+              .map((item) => '${item.done ? '[x]' : '[ ]'} ${item.text}')
+              .join(' | '),
+        ],
+    ];
+    return rows.map((row) => row.map(_csv).join(',')).join('\r\n');
+  }
+
   Future<String> buildJson() async {
     final snapshot = await repository.readExportSnapshot();
     final captures = snapshot.captures;
@@ -110,6 +230,37 @@ class LocalDataExport {
 
   List<T> _sorted<T>(List<T> values, String Function(T) id) =>
       ([...values]..sort((a, b) => id(a).compareTo(id(b))));
+
+  String _taskMarkdown(Task task) {
+    final mark = task.status == TaskStatus.completed ? 'x' : ' ';
+    final details = <String>[
+      task.area,
+      task.priority.name,
+      '${task.minutes} min',
+      if (task.deadline != null) 'due ${task.deadline}',
+    ];
+    return '- [$mark] ${_markdown(task.title)} — ${details.map(_markdown).join(' · ')}';
+  }
+
+  String _markdown(String value) => value
+      .replaceAll('\\', '\\\\')
+      .replaceAll(RegExp(r'[\r\n]+'), ' ')
+      .replaceAll('|', '\\|')
+      .trim();
+
+  String _csv(Object? value) =>
+      '"${(value ?? '').toString().replaceAll('"', '""')}"';
+
+  String _weekday(int value) => const [
+    '',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+    'Sunday',
+  ][value.clamp(1, 7)];
 
   Map<String, Object?> _capture(Capture value) => {
     'id': value.id,

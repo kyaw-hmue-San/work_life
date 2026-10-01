@@ -48,10 +48,13 @@ class AiTaskProposal {
     required this.title,
     this.taskId,
     this.area,
+    this.group,
+    this.details = '',
     this.priority = 'medium',
     this.minutes = 25,
     this.deadline,
     this.reminder,
+    this.plannedStart,
     this.checklist = const [],
     this.included = true,
     this.change = AiProjectChange.auto,
@@ -59,10 +62,13 @@ class AiTaskProposal {
   String title;
   String? taskId;
   String? area;
+  String? group;
+  String details;
   String priority;
   int minutes;
   String? deadline;
   String? reminder;
+  String? plannedStart;
   List<String> checklist;
   bool included;
   AiProjectChange change;
@@ -232,14 +238,21 @@ class AiProposalParser {
     if (reminder != null && DateTime.tryParse(reminder) == null) {
       throw const FormatException('Invalid reminder time.');
     }
+    final plannedStart = task['plannedStart']?.toString();
+    if (plannedStart != null && DateTime.tryParse(plannedStart) == null) {
+      throw const FormatException('Invalid planned start time.');
+    }
     return AiTaskProposal(
       title: _requiredString(task['title'], 'task.title'),
       taskId: task['taskId']?.toString(),
       area: task['area']?.toString(),
+      group: task['group']?.toString(),
+      details: task['details']?.toString() ?? '',
       priority: priority,
       minutes: minutes,
       deadline: deadline,
       reminder: reminder,
+      plannedStart: plannedStart,
       checklist: _strings(task['checklist']),
       change: switch (task['operation']) {
         'add' => AiProjectChange.add,

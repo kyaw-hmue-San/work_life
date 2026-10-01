@@ -8,8 +8,11 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    let launched = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    // Keep FlutterAppDelegate as the notification-center delegate so the
+    // local-notifications plugin can present alerts while Work Life is open.
     UNUserNotificationCenter.current().delegate = self
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    return launched
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {

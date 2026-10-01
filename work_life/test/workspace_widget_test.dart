@@ -5,6 +5,8 @@ import 'package:work_life/captures/capture.dart';
 import 'package:work_life/workspace/records.dart';
 import 'package:work_life/notifications/notification_driver.dart';
 import 'package:work_life/notifications/reminder_notifications.dart';
+import 'package:work_life/workspace/reminder_editor.dart';
+import 'package:work_life/workspace/workspace_model.dart';
 
 import 'support/memory_workspace.dart';
 import 'support/fake_notifications.dart';
@@ -65,6 +67,10 @@ void main() {
       );
       await tester.pumpAndSettle();
       await tester.pumpAndSettle();
+      expect(driver.permissionRequests, 0);
+      expect(find.text('Enable notifications'), findsOneWidget);
+      await tester.tap(find.text('Enable notifications'));
+      await tester.pumpAndSettle();
       expect(driver.permissionRequests, 1);
       expect(driver.alerts, hasLength(1));
       expect(repo.reminders.single.deliveryStatus, 'scheduled');
@@ -73,6 +79,50 @@ void main() {
       await tester.pumpAndSettle();
     },
   );
+
+  testWidgets('saving a reminder explains permission before requesting iOS', (
+    tester,
+  ) async {
+    final repo = MemoryWorkspace()
+      ..tasks.add(const Task(id: 'task', title: 'Visa visit', area: 'Work'));
+    final driver = FakeNotifications()
+      ..state = NotificationPermission.notDetermined
+      ..stateAfterRequest = NotificationPermission.allowed;
+    final notifications = ReminderNotifications(driver);
+    final model = WorkspaceModel(repo, notifications: notifications);
+    await model.load();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (_) => ReminderEditor(model: model, taskId: 'task'),
+              ),
+              child: const Text('Open reminder'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open reminder'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save reminder'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.text('Enable phone alerts?'), findsOneWidget);
+    expect(driver.permissionRequests, 0);
+    expect(repo.reminders, hasLength(1));
+    await tester.tap(find.text('Continue'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(driver.permissionRequests, 1);
+    expect(driver.alerts, hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+    model.dispose();
+    await notifications.idle;
+  });
 
   void roomy(WidgetTester tester) {
     tester.view.physicalSize = const Size(800, 1600);

@@ -1,5 +1,45 @@
 # Pilot validation plan
 
+## Real-device reliability pass — 1 October 2026
+
+- Notification reconciliation no longer opens a native permission prompt as a
+  hidden side effect. Saving a reminder first persists the in-app intent, then
+  presents a Work Life explanation before one explicit iOS/Android request.
+- Permission handling distinguishes not-requested, allowed, provisional,
+  denied, and unsupported behavior. Denied iPhone users receive an explanation
+  and an Open Settings action. Returning from Settings refreshes authorization
+  and reschedules without changing reminder intent.
+- The permission-request bookkeeping key was versioned so an older broken
+  installation cannot incorrectly suppress the corrected one-time request.
+  Foreground presentation keeps `FlutterAppDelegate` as the notification-center
+  delegate after plugin startup.
+- Backup and export are distinct: versioned JSON is retained for restoration;
+  Markdown provides a readable report; CSV provides task rows for spreadsheet
+  use. No database-wide PDF/CSV duplication was added.
+- Schedule images are requested at a maximum 1800 px and JPEG quality 85 to
+  reduce full-resolution phone-photo upload while retaining timetable text.
+  The request remains single-shot, cancellable, retry-safe, and bounded by the
+  existing 35-second app / 30-second proxy timeouts.
+- Import status now follows real callbacks: Preparing image → Uploading and
+  reading timetable → Building editable schedule → Ready for review. A
+  long-provider warning does not pretend that another pipeline stage started.
+- Debug logs record picker/native resize, image read, input/Base64 bytes,
+  encoding, combined upload/backend/provider time, response bytes, parse and
+  proposal time, route-render total, and the proxy `Server-Timing` breakdown.
+  The Edge Function emits separate authentication, provider, and total values.
+- `/Users/rioo/flutter/bin/flutter analyze`: passed with no issues.
+- `/Users/rioo/flutter/bin/flutter test`: all 160 tests passed.
+- iOS device build passed for `com.kyawhmuesan.worklife.dev`.
+- The updated debug app was signed, installed, and launched on Rioooo’s iPhone
+  (`00008030-001C395C1A3A202E`, iOS 27.0). Wireless Flutter attachment was then
+  lost; this proves deployment/startup, not permission-button interaction or a
+  delivered foreground/background banner.
+- Still requires a person on the phone: save a future reminder, observe the Work
+  Life rationale and native prompt, choose Allow, background/terminate the app,
+  and observe the alert. Then deny/reset permission and verify Open Settings.
+  Also import a real timetable while attached and record the emitted stage
+  numbers. Redeploy the changed `ai-proxy` first to receive server-side timing.
+
 ## Multi-device synchronization — 27 September 2026
 
 - SQLite schema v14 adds a durable coalescing outbox, remote revision metadata,

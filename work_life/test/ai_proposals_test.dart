@@ -16,6 +16,20 @@ void main() {
     expect(proposal.questions, ['Which exam date?']);
   });
 
+  test(
+    'project tasks parse grouping, guidance, calendar time and reminder',
+    () {
+      final proposal = parser.project(
+        '''{"type":"project_proposal","project":{"title":"Birthday","tasks":[{"title":"Order cake","group":"Birthday","details":"Ask about dietary needs","plannedStart":"2099-05-01T10:00:00+07:00","reminder":"2099-05-01T09:30:00+07:00"}]},"questions":[]}''',
+      );
+      final task = proposal.tasks.single;
+      expect(task.group, 'Birthday');
+      expect(task.details, contains('dietary'));
+      expect(task.plannedStart, isNotNull);
+      expect(task.reminder, isNotNull);
+    },
+  );
+
   test('project diff operations parse for native review cards', () {
     final proposal = parser.project(
       '''{"type":"project_proposal","project":{"title":"AWS","tasks":[{"taskId":null,"operation":"add","title":"Mock exam"},{"taskId":"one","operation":"change","title":"Study core services"},{"taskId":"two","operation":"move","title":"Practice exam","deadline":"2026-10-10"},{"taskId":"three","operation":"remove","title":"Old task"},{"taskId":"four","operation":"unchanged","title":"Keep task"}]},"questions":[]}''',

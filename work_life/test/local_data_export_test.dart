@@ -71,6 +71,53 @@ void main() {
       expect(exportContainsSecret(decoded), isFalse);
     },
   );
+
+  test('readable exports separate report content from task analysis', () async {
+    final repo = MemoryWorkspace();
+    repo.projects.add(
+      const Project(
+        id: 'birthday',
+        title: 'Birthday plan',
+        area: 'Relationships',
+        description: 'Make the day special.',
+      ),
+    );
+    repo.tasks.add(
+      const Task(
+        id: 'cake',
+        title: 'Order "special" cake',
+        area: 'Relationships',
+        projectId: 'birthday',
+        deadline: '2030-05-03',
+        notes: 'Confirm dietary needs, then order.',
+        checklist: [ChecklistItem(id: 'size', text: 'Choose size')],
+      ),
+    );
+    repo.recurringSchedules.add(
+      const RecurringSchedule(
+        id: 'class',
+        title: 'Software class',
+        type: RecurringScheduleType.classSession,
+        weekday: DateTime.monday,
+        startTime: '09:00',
+        endTime: '10:30',
+        startDate: '2030-01-01',
+      ),
+    );
+    final exporter = LocalDataExport(repo, now: () => DateTime.utc(2030));
+    final markdown = await exporter.buildMarkdown();
+    expect(markdown, contains('# Work Life report'));
+    expect(markdown, contains('### Birthday plan'));
+    expect(markdown, contains('Order "special" cake'));
+    expect(markdown, contains('Monday 09:00–10:30'));
+    expect(markdown, isNot(contains('formatVersion')));
+
+    final csv = await exporter.buildTasksCsv();
+    expect(csv, startsWith('"Title","Status","Priority"'));
+    expect(csv, contains('"Order ""special"" cake"'));
+    expect(csv, contains('"Birthday plan"'));
+    expect(csv, contains('"[ ] Choose size"'));
+  });
 }
 
 bool exportContainsSecret(Map<String, dynamic> value) =>

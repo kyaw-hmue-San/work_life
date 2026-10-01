@@ -3,7 +3,19 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 
-enum NotificationPermission { notDetermined, allowed, blocked, unsupported }
+enum NotificationPermission {
+  notDetermined,
+  allowed,
+  provisional,
+  blocked,
+  unsupported,
+}
+
+extension NotificationPermissionState on NotificationPermission {
+  bool get canSchedule =>
+      this == NotificationPermission.allowed ||
+      this == NotificationPermission.provisional;
+}
 
 class PendingAlert {
   const PendingAlert(this.id, this.payload);
@@ -26,7 +38,7 @@ class LocalNotificationDriver implements NotificationDriver {
       FlutterLocalNotificationsPlugin();
   bool _ready = false;
   static const _permissionRequestedKey =
-      'work_life.notification_permission_requested';
+      'work_life.notification_permission_requested_v2';
   bool get supported =>
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.android ||
@@ -64,10 +76,10 @@ class LocalNotificationDriver implements NotificationDriver {
       final preferences = await SharedPreferences.getInstance();
       var previouslyRequested =
           preferences.getBool(_permissionRequestedKey) ?? false;
-      if (request) {
+      if (request && !previouslyRequested) {
         await android.requestNotificationsPermission();
         previouslyRequested = true;
-        preferences.setBool(_permissionRequestedKey, true);
+        await preferences.setBool(_permissionRequestedKey, true);
       }
       final channels = await android.getNotificationChannels();
       if (channels?.any(
@@ -92,14 +104,17 @@ class LocalNotificationDriver implements NotificationDriver {
     final preferences = await SharedPreferences.getInstance();
     var previouslyRequested =
         preferences.getBool(_permissionRequestedKey) ?? false;
-    if (request) {
+    if (request && !previouslyRequested) {
       await ios.requestPermissions(alert: true, sound: true, badge: false);
       previouslyRequested = true;
-      preferences.setBool(_permissionRequestedKey, true);
+      await preferences.setBool(_permissionRequestedKey, true);
     }
     final status = await ios.checkPermissions();
-    if (status?.isEnabled == true || status?.isProvisionalEnabled == true) {
+    if (status?.isEnabled == true) {
       return NotificationPermission.allowed;
+    }
+    if (status?.isProvisionalEnabled == true) {
+      return NotificationPermission.provisional;
     }
     return previouslyRequested
         ? NotificationPermission.blocked

@@ -403,6 +403,100 @@ void main() {
   );
 
   test(
+    'approved AI project persists its calendar block and reminder atomically',
+    () async {
+      final proposal = AiProjectProposal(
+        title: 'Birthday preparation',
+        area: 'Relationships',
+        tasks: [
+          AiTaskProposal(
+            title: 'Collect birthday cake',
+            group: 'Birthday',
+            details: 'Confirm dietary preferences before ordering.',
+            minutes: 45,
+            deadline: '2099-05-03',
+            plannedStart: '2099-05-02T15:00:00+07:00',
+            reminder: '2099-05-02T14:30:00+07:00',
+          ),
+        ],
+      );
+      await repository.applyProjectProposal(
+        proposal,
+        operationId: 'calendar-and-reminder',
+      );
+      final data = await repository.readWorkspace();
+      final task = data.tasks.single;
+      expect(task.notes, contains('dietary preferences'));
+      expect(data.plans.single.taskId, task.id);
+      expect(data.plans.single.minutes, 45);
+      expect(data.reminders.single.taskId, task.id);
+      expect(data.reminders.single.origin, ReminderOrigin.explicit);
+      expect(data.reminders.single.basis, ReminderBasis.plannedTime);
+    },
+  );
+
+  test(
+    'approved standalone AI task persists calendar and explicit reminder',
+    () async {
+      final proposal = AiCaptureProposal(
+        kind: AiCaptureKind.standaloneTask,
+        task: AiTaskProposal(
+          title: 'Collect parcel',
+          area: 'Work',
+          minutes: 30,
+          plannedStart: '2099-05-02T15:00:00+07:00',
+          reminder: '2099-05-02T14:45:00+07:00',
+        ),
+      );
+      await repository.applyCaptureProposal(
+        proposal,
+        operationId: 'standalone-calendar-reminder',
+      );
+      final data = await repository.readWorkspace();
+      final task = data.tasks.single;
+      expect(data.plans.single.taskId, task.id);
+      expect(data.reminders.single.taskId, task.id);
+      expect(data.reminders.single.origin, ReminderOrigin.explicit);
+      expect(data.reminders.single.basis, ReminderBasis.plannedTime);
+    },
+  );
+
+  test('AI project approval rejects calendar conflicts atomically', () async {
+    await repository.savePlan(
+      PlanBlock(
+        id: newId(),
+        title: 'Existing appointment',
+        start: DateTime(2099, 5, 2, 15),
+        minutes: 60,
+        area: 'Work',
+        fixed: true,
+      ),
+    );
+    final proposal = AiProjectProposal(
+      title: 'Parcel trip',
+      area: 'Work',
+      tasks: [
+        AiTaskProposal(
+          title: 'Collect parcel',
+          minutes: 30,
+          plannedStart: '2099-05-02T15:15:00+07:00',
+        ),
+      ],
+    );
+    await expectLater(
+      repository.applyProjectProposal(
+        proposal,
+        operationId: 'calendar-conflict',
+      ),
+      throwsArgumentError,
+    );
+    final data = await repository.readWorkspace();
+    expect(data.projects, isEmpty);
+    expect(data.tasks, isEmpty);
+    expect(data.plans.single.title, 'Existing appointment');
+  });
+
+  test(
     'clearLocalData removes workspace content and resets settings after reopen',
     () async {
       final task = Task(id: newId(), title: 'Delete me', area: 'Work');

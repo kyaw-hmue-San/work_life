@@ -33,8 +33,12 @@ class InboxModel extends ChangeNotifier {
   }
 
   Future<bool> save(String text) async {
+    return await saveCapture(text) != null;
+  }
+
+  Future<Capture?> saveCapture(String text) async {
     if (saving || loading || loadError != null || text.trim().isEmpty) {
-      return false;
+      return null;
     }
     saving = true;
     saveError = null;
@@ -48,10 +52,10 @@ class InboxModel extends ChangeNotifier {
       await repository.save(capture);
       captures = [capture, ...captures.where((item) => item.id != capture.id)];
       _pending = null;
-      return true;
+      return capture;
     } catch (_) {
       saveError = 'Couldn’t save yet. Your text is still here—try again.';
-      return false;
+      return null;
     } finally {
       saving = false;
       _changed();

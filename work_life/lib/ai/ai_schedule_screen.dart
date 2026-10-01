@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../workspace/records.dart';
 import '../workspace/workspace_model.dart';
+import 'aimlapi_client.dart';
 import 'ai_proposals.dart';
 
 class AiScheduleProposalScreen extends StatefulWidget {
@@ -236,13 +237,16 @@ class _AiScheduleProposalScreenState extends State<AiScheduleProposalScreen> {
         proposal = replacement;
         _makeControllers();
       });
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
+        final message = error is AiServiceException
+            ? error.message
+            : error is FormatException
+            ? 'AI returned an incomplete schedule. Add exact dates or availability and try again.'
+            : 'Couldn’t rebuild the plan.';
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t rebuild the plan. Your current proposal is unchanged.',
-            ),
+          SnackBar(
+            content: Text('$message Your current proposal is unchanged.'),
           ),
         );
       }
@@ -266,14 +270,15 @@ class _AiScheduleProposalScreenState extends State<AiScheduleProposalScreen> {
         _makeControllers();
         adjustment.clear();
       });
-    } catch (_) {
+    } catch (error) {
       if (mounted) {
+        final message = error is AiServiceException
+            ? error.message
+            : error is FormatException
+            ? 'AI returned an incomplete adjustment. Include exact days or times and retry.'
+            : 'Couldn’t adjust this proposal.';
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t adjust this proposal. Nothing was changed.',
-            ),
-          ),
+          SnackBar(content: Text('$message Nothing was changed.')),
         );
       }
     } finally {
@@ -400,7 +405,7 @@ class _AiScheduleProposalScreenState extends State<AiScheduleProposalScreen> {
               controller: adjustment,
               maxLines: 2,
               decoration: const InputDecoration(
-                labelText: 'Adjust this plan',
+                labelText: 'Answer questions or adjust this plan',
                 hintText:
                     'Move exercise earlier; keep everything else the same',
                 border: OutlineInputBorder(),

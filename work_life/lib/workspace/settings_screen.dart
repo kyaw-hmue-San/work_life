@@ -38,7 +38,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Future<void> _export() async {
+  Future<void> _shareExport({
+    required Future<String> Function() build,
+    required String fileName,
+    required String mimeType,
+    required String subject,
+  }) async {
     if (_exporting || widget.model.busy) return;
     setState(() => _exporting = true);
     final box = context.findRenderObject() as RenderBox?;
@@ -46,19 +51,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ? null
         : box.localToGlobal(Offset.zero) & box.size;
     try {
-      final json = await widget.model.exportLocalData();
+      final content = await build();
       if (!mounted) return;
       await (widget.share ?? SharePlus.instance.share)(
         ShareParams(
           files: [
             XFile.fromData(
-              Uint8List.fromList(utf8.encode(json)),
-              mimeType: 'application/json',
-              name: 'work_life_export.json',
+              Uint8List.fromList(utf8.encode(content)),
+              mimeType: mimeType,
+              name: fileName,
             ),
           ],
-          fileNameOverrides: const ['work_life_export.json'],
-          subject: 'Work Life data export',
+          fileNameOverrides: [fileName],
+          subject: subject,
           sharePositionOrigin: origin,
         ),
       );
@@ -66,9 +71,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Could not create or share the data export. Please retry.',
-          ),
+          content: Text('Could not create or share this file. Please retry.'),
         ),
       );
     } finally {
@@ -362,11 +365,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 8),
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.ios_share_outlined),
-                title: const Text('Export my data'),
-                subtitle: const Text('Share a versioned JSON export'),
+                leading: const Icon(Icons.backup_outlined),
+                title: const Text('Create backup'),
+                subtitle: const Text(
+                  'Versioned JSON for restoring Work Life later',
+                ),
                 enabled: !widget.model.busy && !_exporting,
-                onTap: _export,
+                onTap: () => _shareExport(
+                  build: widget.model.exportLocalData,
+                  fileName: 'work_life_backup.json',
+                  mimeType: 'application/json',
+                  subject: 'Work Life backup',
+                ),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.description_outlined),
+                title: const Text('Export readable report'),
+                subtitle: const Text(
+                  'Markdown summary of projects, tasks and schedules',
+                ),
+                enabled: !widget.model.busy && !_exporting,
+                onTap: () => _shareExport(
+                  build: widget.model.exportReadableReport,
+                  fileName: 'work_life_report.md',
+                  mimeType: 'text/markdown',
+                  subject: 'Work Life readable report',
+                ),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.table_chart_outlined),
+                title: const Text('Export tasks as CSV'),
+                subtitle: const Text('Open your task list in a spreadsheet'),
+                enabled: !widget.model.busy && !_exporting,
+                onTap: () => _shareExport(
+                  build: widget.model.exportTasksCsv,
+                  fileName: 'work_life_tasks.csv',
+                  mimeType: 'text/csv',
+                  subject: 'Work Life tasks',
+                ),
               ),
               ListTile(
                 contentPadding: EdgeInsets.zero,

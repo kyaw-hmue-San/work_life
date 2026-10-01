@@ -367,6 +367,83 @@ class SqliteWorkspaceRepository extends SqliteCaptureRepository
     return wanted;
   }
 
+  Future<void> _ensureProposedPlanFits(
+    Transaction tx, {
+    required String title,
+    required DateTime start,
+    required int minutes,
+  }) async {
+    final data = await _readWorkspace(tx);
+    final proposed = PlanBlock(
+      id: 'proposal-validation',
+      title: title,
+      start: start,
+      minutes: minutes,
+      area: '',
+    );
+    final transition = Duration(
+      minutes: data.planningPreferences.transitionMinutes,
+    );
+    final conflictsWithPlan = data.plans.any(
+      (plan) =>
+          plan.start.isBefore(proposed.end.add(transition)) &&
+          plan.end.add(transition).isAfter(proposed.start),
+    );
+    if (conflictsWithPlan) {
+      throw ArgumentError(
+        'The suggested calendar time conflicts with an existing plan.',
+      );
+    }
+
+    final day = DateTime(start.year, start.month, start.day);
+    final key = dayKey(day);
+    int minuteOf(String value) {
+      final parts = value.split(':');
+      return int.parse(parts[0]) * 60 + int.parse(parts[1]);
+    }
+
+    for (final schedule in data.recurringSchedules.where(
+      (item) => item.fixed,
+    )) {
+      final relevantExceptions = data.scheduleExceptions.where(
+        (item) => item.scheduleId == schedule.id,
+      );
+      final sameDay = relevantExceptions.where((item) => item.day == key);
+      final movedHere = relevantExceptions.where(
+        (item) => item.movedToDate == key && !item.cancelled,
+      );
+      final movedAway = sameDay.any(
+        (item) => item.cancelled || item.movedToDate != null,
+      );
+      final occursNormally = schedule.occursOn(day) && !movedAway;
+      if (!occursNormally && movedHere.isEmpty) continue;
+      final exception = movedHere.isNotEmpty
+          ? movedHere.first
+          : sameDay.where((item) => !item.cancelled).firstOrNull;
+      final startMinute = minuteOf(exception?.startTime ?? schedule.startTime);
+      final endMinute = minuteOf(exception?.endTime ?? schedule.endTime);
+      final fixedStart = DateTime(
+        day.year,
+        day.month,
+        day.day,
+      ).add(Duration(minutes: startMinute));
+      var fixedEnd = DateTime(
+        day.year,
+        day.month,
+        day.day,
+      ).add(Duration(minutes: endMinute));
+      if (!fixedEnd.isAfter(fixedStart)) {
+        fixedEnd = fixedEnd.add(const Duration(days: 1));
+      }
+      if (fixedStart.isBefore(proposed.end.add(transition)) &&
+          fixedEnd.add(transition).isAfter(proposed.start)) {
+        throw ArgumentError(
+          'The suggested calendar time conflicts with a recurring commitment.',
+        );
+      }
+    }
+  }
+
   @override
   Future<void> applyCaptureProposal(
     AiCaptureProposal proposal, {
@@ -430,6 +507,30 @@ class SqliteWorkspaceRepository extends SqliteCaptureRepository
                 .toList(),
           ),
         });
+        if (task.plannedStart case final planned?) {
+          final start = DateTime.tryParse(planned)?.toLocal();
+          if (start == null || !start.isAfter(DateTime.now())) {
+            throw ArgumentError('Proposed calendar time must be in the future');
+          }
+          await _ensureProposedPlanFits(
+            tx,
+            title: task.title.trim(),
+            start: start,
+            minutes: task.minutes,
+          );
+          await tx.insert('plans', {
+            'id': newId(),
+            'title': task.title.trim(),
+            'task_id': taskId,
+            'start': start.toUtc().toIso8601String(),
+            'minutes': task.minutes,
+            'area': selectedArea,
+            'fixed': 0,
+          });
+          if (task.reminder == null) {
+            await _saveDefaultReminder(tx, taskId, start);
+          }
+        }
         if (task.reminder != null) {
           final reminderAt = DateTime.tryParse(task.reminder!)?.toUtc();
           if (reminderAt == null ||
@@ -442,7 +543,9 @@ class SqliteWorkspaceRepository extends SqliteCaptureRepository
             'scheduled_at': reminderAt.toIso8601String(),
             'delivery_status': 'pending',
             'origin': ReminderOrigin.explicit.name,
-            'basis': ReminderBasis.explicit.name,
+            'basis': task.plannedStart == null
+                ? ReminderBasis.explicit.name
+                : ReminderBasis.plannedTime.name,
             'recurrence': ReminderRecurrence.none.name,
           });
         }
@@ -547,6 +650,7 @@ class SqliteWorkspaceRepository extends SqliteCaptureRepository
           first = false;
           continue;
         }
+        late final String savedTaskId;
         if (item.taskId != null && targetProjectId != null) {
           final existingTask = await tx.query(
             'tasks',
@@ -564,14 +668,17 @@ class SqliteWorkspaceRepository extends SqliteCaptureRepository
               'deadline': item.deadline,
               'minutes': item.minutes,
               'priority': item.priority,
+              'notes': item.details.trim(),
               if (item.checklist.isNotEmpty) 'checklist': checklist,
             },
             where: 'id = ?',
             whereArgs: [item.taskId],
           );
+          savedTaskId = item.taskId!;
         } else {
+          savedTaskId = newId();
           await tx.insert('tasks', {
-            'id': newId(),
+            'id': savedTaskId,
             'title': item.title.trim(),
             'area': taskArea,
             'project_id': projectId,
@@ -579,11 +686,58 @@ class SqliteWorkspaceRepository extends SqliteCaptureRepository
             'entry_id': null,
             'deadline': item.deadline,
             'minutes': item.minutes,
-            'notes': '',
+            'notes': item.details.trim(),
             'priority': item.priority,
             'status': TaskStatus.open.name,
             'checklist': checklist,
           });
+        }
+        if (item.plannedStart case final planned?) {
+          final start = DateTime.tryParse(planned)?.toLocal();
+          if (start == null || !start.isAfter(DateTime.now())) {
+            throw ArgumentError('Proposed calendar time must be in the future');
+          }
+          await _ensureProposedPlanFits(
+            tx,
+            title: item.title.trim(),
+            start: start,
+            minutes: item.minutes,
+          );
+          await tx.insert('plans', {
+            'id': newId(),
+            'title': item.title.trim(),
+            'task_id': savedTaskId,
+            'start': start.toUtc().toIso8601String(),
+            'minutes': item.minutes,
+            'area': taskArea,
+            'fixed': 0,
+          });
+          if (item.reminder == null) {
+            await _saveDefaultReminder(tx, savedTaskId, start);
+          }
+        }
+        if (item.reminder case final reminder?) {
+          final reminderAt = DateTime.tryParse(reminder)?.toUtc();
+          if (reminderAt == null ||
+              !reminderAt.isAfter(DateTime.now().toUtc())) {
+            throw ArgumentError('Proposed reminder must be in the future');
+          }
+          await tx.delete(
+            'reminder_suppressions',
+            where: 'task_id = ?',
+            whereArgs: [savedTaskId],
+          );
+          await tx.insert('reminders', {
+            'id': newId(),
+            'task_id': savedTaskId,
+            'scheduled_at': reminderAt.toIso8601String(),
+            'delivery_status': 'pending',
+            'origin': ReminderOrigin.explicit.name,
+            'basis': item.plannedStart == null
+                ? ReminderBasis.explicit.name
+                : ReminderBasis.plannedTime.name,
+            'recurrence': ReminderRecurrence.none.name,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
         }
         first = false;
       }

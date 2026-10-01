@@ -184,6 +184,12 @@ class WorkspaceModel extends ChangeNotifier {
 
   Future<String> exportLocalData() => LocalDataExport(repository).buildJson();
 
+  Future<String> exportReadableReport() =>
+      LocalDataExport(repository).buildMarkdown();
+
+  Future<String> exportTasksCsv() =>
+      LocalDataExport(repository).buildTasksCsv();
+
   Future<bool> importLocalData(String json) async => change(() async {
     await LocalDataImport(repository).restore(json);
   });

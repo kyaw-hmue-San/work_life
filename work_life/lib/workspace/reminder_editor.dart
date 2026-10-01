@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../notifications/notification_driver.dart';
 import 'records.dart';
 import 'reminder_defaults.dart';
 import 'workspace_model.dart';
@@ -84,6 +85,8 @@ class _ReminderEditorState extends State<ReminderEditor> {
     );
     if (!mounted) return;
     if (ok) {
+      await _finishNotificationSetup();
+      if (!mounted) return;
       Navigator.pop(context);
     } else {
       setState(() {
@@ -91,6 +94,59 @@ class _ReminderEditorState extends State<ReminderEditor> {
         error = widget.model.error ?? 'Please retry saving your reminder.';
       });
     }
+  }
+
+  Future<void> _finishNotificationSetup() async {
+    final notifications = widget.model.notifications;
+    if (notifications == null) return;
+    if (notifications.permission == NotificationPermission.notDetermined) {
+      final enable = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Enable phone alerts?'),
+          content: const Text(
+            'Work Life needs notification permission to alert you when this reminder is due. Your reminder remains visible in Today even if you choose Not now.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+      if (enable == true && mounted) {
+        await widget.model.refreshNotifications(requestPermission: true);
+      }
+    }
+    if (!mounted ||
+        notifications.permission != NotificationPermission.blocked) {
+      return;
+    }
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Notifications are disabled'),
+        content: const Text(
+          'iOS will not show the permission prompt again. Open Settings and allow notifications for Work Life to receive phone alerts.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Later'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Open Settings'),
+          ),
+        ],
+      ),
+    );
+    if (open == true) await notifications.openSettings();
   }
 
   @override

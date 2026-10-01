@@ -50,8 +50,8 @@ void main() {
       '  Dinner with family\nFriday?  ',
     );
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Save capture'));
-    await tester.tap(find.text('Save capture'));
+    await tester.ensureVisible(find.text('Save as note'));
+    await tester.tap(find.text('Save as note'));
     await tester.pumpAndSettle();
     expect(
       repository.items.single.originalText,
@@ -92,15 +92,15 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).first, 'Take a walk');
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Save capture'));
-    await tester.tap(find.text('Save capture'));
+    await tester.ensureVisible(find.text('Save as note'));
+    await tester.tap(find.text('Save as note'));
     await tester.pumpAndSettle();
     expect(find.text('Take a walk'), findsOneWidget);
     expect(find.textContaining('Couldn’t save yet'), findsOneWidget);
     repository.failSave = false;
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Save capture'));
-    await tester.tap(find.text('Save capture'));
+    await tester.ensureVisible(find.text('Save as note'));
+    await tester.tap(find.text('Save as note'));
     await tester.pumpAndSettle();
     expect(repository.items, hasLength(1));
   });
@@ -124,6 +124,34 @@ void main() {
       tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
       isNull,
     );
+  });
+
+  testWidgets('Inbox organizes a draft with AI without reopening the capture', (
+    tester,
+  ) async {
+    roomyScreen(tester);
+    final repository = MemoryRepository();
+    Capture? organized;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: InboxScreen(
+          repository: repository,
+          onOrganizeCapture: (capture) async => organized = capture,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(TextField).first,
+      'Plan a birthday and renew my visa',
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Organize with AI'));
+    await tester.tap(find.text('Organize with AI'));
+    await tester.pumpAndSettle();
+    expect(repository.items, hasLength(1));
+    expect(organized?.originalText, 'Plan a birthday and renew my visa');
+    expect(find.text('Plan a birthday and renew my visa'), findsOneWidget);
   });
 
   testWidgets('small screen with large text lays out without overflow', (
@@ -195,7 +223,13 @@ void main() {
     await tester.tap(find.text('Import a schedule image'));
     await tester.pump();
     expect(find.text('Reading your schedule'), findsOneWidget);
+    expect(
+      find.text('Uploading schedule and reading the timetable…'),
+      findsOneWidget,
+    );
     expect(find.text('Cancel'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 21));
+    expect(find.textContaining('provider is taking longer'), findsOneWidget);
     response.complete(http.Response('{"error":{}}', 500));
     await tester.pumpAndSettle();
     expect(find.text('Retry'), findsOneWidget);

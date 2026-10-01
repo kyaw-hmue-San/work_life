@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:work_life/ai/aimlapi_client.dart';
 import 'package:work_life/ai/capture_assistant.dart';
+import 'package:work_life/ai/ai_capture_proposal_screen.dart';
 import 'package:work_life/ai/ai_proposal_screen.dart';
 import 'package:work_life/ai/ai_proposals.dart';
 import 'package:work_life/ai/ai_schedule_screen.dart';
@@ -110,7 +111,11 @@ void main() {
                         'title': 'Airport pickups',
                         'area': 'Personal',
                         'tasks': [
-                          {'title': 'Pick up friend', 'minutes': 30},
+                          {
+                            'title': 'Pick up friend',
+                            'group': 'Airport',
+                            'minutes': 30,
+                          },
                           {
                             'title': 'Pick up parcel at terminal',
                             'minutes': 15,
@@ -131,15 +136,84 @@ void main() {
       final proposal = await client.classifyCapture(
         'Pick up my friend, then collect my parcel at the terminal',
         existingAreas: ['Work', 'Personal'],
+        planningContext: {
+          'existingCalendar': [
+            {'title': 'Class', 'start': '2099-05-01T09:00:00+07:00'},
+          ],
+        },
       );
       final userMessage = (sent['messages'] as List).last as Map;
       final context = jsonDecode(userMessage['content'] as String) as Map;
       expect(context['existingAreas'], ['Work', 'Personal']);
+      expect(context['planningContext'], isNotEmpty);
       expect(proposal.kind, AiCaptureKind.project);
       expect(proposal.project!.tasks.map((task) => task.title), [
         'Pick up friend',
         'Pick up parcel at terminal',
       ]);
+      expect(proposal.project!.tasks.first.group, 'Airport');
+    },
+  );
+
+  test(
+    'capture clarification sends answers and current editable plan',
+    () async {
+      late Map<String, dynamic> sent;
+      final client = AimlApiClient(
+        apiKey: 'test-key',
+        client: MockClient((request) async {
+          sent = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'content': jsonEncode({
+                      'type': 'project_proposal',
+                      'project': {
+                        'title': 'Birthday and immigration plan',
+                        'area': 'Personal',
+                        'tasks': [
+                          {
+                            'title': 'Submit visa extension',
+                            'group': 'Immigration',
+                            'deadline': '2099-05-03',
+                          },
+                        ],
+                      },
+                      'questions': [],
+                    }),
+                  },
+                },
+              ],
+            }),
+            200,
+          );
+        }),
+      );
+      addTearDown(client.dispose);
+      final result = await client.refineCaptureProject(
+        originalInput: 'Plan a birthday and extend my visa',
+        proposal: AiProjectProposal(
+          title: 'My plan',
+          area: 'Personal',
+          tasks: [AiTaskProposal(title: 'Visit immigration')],
+          questions: const ['When does your visa expire?'],
+        ),
+        answers: const {'When does your visa expire?': 'May 3, 2099'},
+        existingAreas: const ['Personal'],
+        planningContext: const {'timezone': 'Asia/Bangkok'},
+      );
+      final userMessage = (sent['messages'] as List).last as Map;
+      final context = jsonDecode(userMessage['content'] as String) as Map;
+      expect(
+        (context['answers'] as Map)['When does your visa expire?'],
+        'May 3, 2099',
+      );
+      expect((context['currentProposal'] as Map)['title'], 'My plan');
+      expect(context['planningContext'], {'timezone': 'Asia/Bangkok'});
+      expect(result.tasks.single.group, 'Immigration');
+      expect(result.tasks.single.deadline, '2099-05-03');
     },
   );
 
@@ -162,6 +236,65 @@ void main() {
       ),
     );
   });
+
+  test(
+    'schedule image import reports real stages and sends one request',
+    () async {
+      final stages = <ScheduleImportStage>[];
+      var requests = 0;
+      late Map<String, dynamic> sent;
+      final client = AimlApiClient(
+        apiKey: 'test-key',
+        model: 'text-model',
+        visionModel: 'fast-vision-model',
+        client: MockClient((request) async {
+          requests++;
+          sent = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'content': jsonEncode({
+                      'type': 'schedule_proposal',
+                      'events': [
+                        {
+                          'title': 'Software class',
+                          'kind': 'classSession',
+                          'weekday': 1,
+                          'start': '09:00',
+                          'end': '10:00',
+                        },
+                      ],
+                      'questions': [],
+                    }),
+                  },
+                },
+              ],
+            }),
+            200,
+            headers: const {
+              'server-timing': 'auth;dur=8.0, provider;dur=1200.0',
+            },
+          );
+        }),
+      );
+      addTearDown(client.dispose);
+      final proposal = await client.analyzeScheduleImage(
+        Uint8List.fromList([1, 2, 3]),
+        onProgress: (value) => stages.add(value.stage),
+      );
+      expect(requests, 1);
+      expect(sent['model'], 'fast-vision-model');
+      expect(stages, [
+        ScheduleImportStage.preparingImage,
+        ScheduleImportStage.uploadingAndReading,
+        ScheduleImportStage.buildingProposal,
+        ScheduleImportStage.ready,
+      ]);
+      expect(proposal.events.single.title, 'Software class');
+    },
+  );
 
   testWidgets('suggested Life Area is explicit and rejecting saves nothing', (
     tester,
@@ -200,12 +333,112 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byType(SwitchListTile));
     await tester.pump();
-    await tester.ensureVisible(find.text('Approve and create'));
-    await tester.tap(find.text('Approve and create'));
+    await tester.ensureVisible(find.text('Approve plan'));
+    await tester.tap(find.text('Approve plan'));
     await tester.pumpAndSettle();
     expect(repo.areas, contains('Travel'));
     expect(repo.projects.single.area, 'Travel');
   });
+
+  testWidgets('single capture questions can refine the draft before approval', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repo = MemoryWorkspace();
+    final model = WorkspaceModel(repo);
+    await model.load();
+    addTearDown(model.dispose);
+    Map<String, String>? received;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AiCaptureProposalScreen(
+          model: model,
+          proposal: AiCaptureProposal(
+            kind: AiCaptureKind.standaloneTask,
+            task: AiTaskProposal(title: 'Visit immigration'),
+            questions: const ['When does your visa expire?'],
+          ),
+          onClarify: (current, answers) async {
+            received = answers;
+            return AiCaptureProposal(
+              kind: current.kind,
+              task: AiTaskProposal(
+                title: 'Prepare visa extension documents',
+                deadline: '2099-05-03',
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('When does your visa expire?'));
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Type your answer…'),
+      'May 3, 2099',
+    );
+    await tester.tap(find.text('Update with answers'));
+    await tester.pumpAndSettle();
+    expect(received?['When does your visa expire?'], 'May 3, 2099');
+    expect(find.text('Prepare visa extension documents'), findsOneWidget);
+    expect(repo.tasks, isEmpty);
+  });
+
+  testWidgets(
+    'proposal questions accept answers and refresh only the draft plan',
+    (tester) async {
+      tester.view.physicalSize = const Size(800, 1400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final repo = MemoryWorkspace();
+      final model = WorkspaceModel(repo);
+      await model.load();
+      addTearDown(model.dispose);
+      final initial = AiProjectProposal(
+        title: 'Important errands',
+        tasks: [AiTaskProposal(title: 'Visit immigration')],
+        questions: const ['When does your visa expire?'],
+      );
+      Map<String, String>? received;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AiProjectProposalScreen(
+            model: model,
+            proposal: initial,
+            onClarify: (current, answers) async {
+              received = answers;
+              return AiProjectProposal(
+                title: current.title,
+                tasks: [
+                  AiTaskProposal(
+                    title: 'Prepare visa extension documents',
+                    group: 'Immigration',
+                    deadline: '2099-05-03',
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('When does your visa expire?'));
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Type your answer…'),
+        'May 3, 2099',
+      );
+      await tester.tap(find.text('Update plan with answers'));
+      await tester.pumpAndSettle();
+      expect(received?['When does your visa expire?'], 'May 3, 2099');
+      expect(find.text('Immigration'), findsOneWidget);
+      expect(find.text('Prepare visa extension documents'), findsOneWidget);
+      expect(repo.projects, isEmpty);
+    },
+  );
 
   test('calendar progress counts each task once and updates to complete', () {
     final day = DateTime(2035, 4, 16);
@@ -341,10 +574,10 @@ void main() {
           home: AiProjectProposalScreen(model: model, proposal: proposal),
         ),
       );
-      expect(find.text('Project title'), findsOneWidget);
+      expect(find.text('Plan title'), findsOneWidget);
       expect(find.text('Review core services'), findsOneWidget);
       expect(find.textContaining('{"type"'), findsNothing);
-      await tester.tap(find.text('Reject proposal'));
+      await tester.tap(find.text('Keep only the original note'));
       await tester.pumpAndSettle();
       expect(repo.projects, isEmpty);
       expect(repo.tasks, isEmpty);

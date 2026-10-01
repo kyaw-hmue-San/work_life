@@ -283,6 +283,18 @@ class MemoryWorkspace implements WorkspaceRepository {
           .toList(),
     );
     tasks.add(task);
+    if (proposalTask.plannedStart case final planned?) {
+      plans.add(
+        PlanBlock(
+          id: newId(),
+          title: task.title,
+          taskId: task.id,
+          start: DateTime.parse(planned).toLocal(),
+          minutes: task.minutes,
+          area: task.area,
+        ),
+      );
+    }
     if (proposalTask.reminder != null) {
       reminders.add(
         TaskReminder(
@@ -337,30 +349,51 @@ class MemoryWorkspace implements WorkspaceRepository {
         continue;
       }
       if (previous != null) tasks.remove(previous);
-      tasks.add(
-        Task(
-          id: previous?.id ?? newId(),
-          title: item.title,
-          area: item.area == null
-              ? area
-              : approvedArea(
-                  item.area,
-                  allowCreate:
-                      proposal.createArea &&
-                      item.area!.trim().toLowerCase() == area.toLowerCase(),
-                ),
-          projectId: project.id,
-          captureId: previous?.captureId ?? (first ? captureId : null),
-          deadline: item.deadline,
-          minutes: item.minutes,
-          notes: 'AI suggested priority: ${item.priority}',
-          priority: TaskPriority.values.byName(item.priority),
-          status: previous?.status ?? TaskStatus.open,
-          checklist: item.checklist
-              .map((text) => ChecklistItem(id: newId(), text: text))
-              .toList(),
-        ),
+      final savedTask = Task(
+        id: previous?.id ?? newId(),
+        title: item.title,
+        area: item.area == null
+            ? area
+            : approvedArea(
+                item.area,
+                allowCreate:
+                    proposal.createArea &&
+                    item.area!.trim().toLowerCase() == area.toLowerCase(),
+              ),
+        projectId: project.id,
+        captureId: previous?.captureId ?? (first ? captureId : null),
+        deadline: item.deadline,
+        minutes: item.minutes,
+        notes: item.details,
+        priority: TaskPriority.values.byName(item.priority),
+        status: previous?.status ?? TaskStatus.open,
+        checklist: item.checklist
+            .map((text) => ChecklistItem(id: newId(), text: text))
+            .toList(),
       );
+      tasks.add(savedTask);
+      if (item.plannedStart case final planned?) {
+        plans.add(
+          PlanBlock(
+            id: newId(),
+            title: item.title,
+            taskId: savedTask.id,
+            start: DateTime.parse(planned).toLocal(),
+            minutes: item.minutes,
+            area: savedTask.area,
+          ),
+        );
+      }
+      if (item.reminder case final reminder?) {
+        reminders.removeWhere((value) => value.taskId == savedTask.id);
+        reminders.add(
+          TaskReminder(
+            id: newId(),
+            taskId: savedTask.id,
+            scheduledAt: DateTime.parse(reminder).toUtc(),
+          ),
+        );
+      }
       first = false;
     }
   }

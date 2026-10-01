@@ -122,6 +122,37 @@ void main() {
         calls.where((call) => call.method == 'requestPermissions'),
         hasLength(1),
       );
+      await driver.permission(request: true);
+      expect(
+        calls.where((call) => call.method == 'requestPermissions'),
+        hasLength(1),
+        reason: 'iOS permission prompts must not be requested repeatedly',
+      );
     },
   );
+
+  test('iOS reports provisional authorization distinctly', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    IOSFlutterLocalNotificationsPlugin.registerWith();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'checkPermissions') {
+            return {
+              'isEnabled': false,
+              'isSoundEnabled': false,
+              'isAlertEnabled': false,
+              'isBadgeEnabled': false,
+              'isProvisionalEnabled': true,
+              'isCriticalEnabled': false,
+              'isProvidesAppNotificationSettingsEnabled': false,
+              'isCarPlayEnabled': false,
+            };
+          }
+          return true;
+        });
+    expect(
+      await LocalNotificationDriver().permission(),
+      NotificationPermission.provisional,
+    );
+  });
 }

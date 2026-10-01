@@ -1,10 +1,10 @@
-# Local export and reset
+# Local backup, export, restore, and reset
 
 Implemented 9 September 2026 in **More → Settings → Data**. These controls operate on the currently selected local workspace, including guest mode. They do not aggregate or delete other account databases.
 
-## Export format version 1
+## Restorable backup format version 1
 
-`Export my data` generates UTF-8 JSON and opens the existing `share_plus` file delivery mechanism with `work_life_export.json` and MIME type `application/json`. The destination is chosen by the user. Generation is independent of delivery and reads all categories in one SQLite transaction. No new dependency or SQLite migration was needed for this completion.
+`Create backup` generates UTF-8 JSON and opens the existing `share_plus` file delivery mechanism with `work_life_backup.json` and MIME type `application/json`. The destination is chosen by the user. Generation is independent of delivery and reads all categories in one SQLite transaction. This is the only format accepted by Restore because it retains stable IDs, relationships, settings, and reminder intent.
 
 The root is `{ "formatVersion": 1, "exportedAt": "<UTC ISO-8601 instant>", "app": "Work Life", "data": { ... } }`.
 
@@ -27,6 +27,12 @@ Entity lists are sorted by ID; routine history by routine ID then day; areas/sup
 
 There are no separate Inbox, Today, Life Map insight, or account-profile tables to export. These are derived views or separate authentication state. Excluded: authentication/session credentials, email/account IDs and database namespace hashes, secure-storage contents, configuration keys, OS notification IDs/payloads, notification delivery status, SQLite row IDs/schema bookkeeping, workspace onboarding completion (startup metadata), unsaved forms. Delivery status is device bookkeeping, not portable reminder intent. User-authored text is exported exactly, including any private information the user typed; the exporter does not redact that text.
 
+## Human-readable exports
+
+`Export readable report` produces `work_life_report.md`, with a summary followed by projects and their tasks, unassigned tasks, Planner blocks, recurring commitments, and routines. It is intended for reading, archiving, and sharing; it is not accepted by Restore.
+
+`Export tasks as CSV` produces `work_life_tasks.csv`, with one row per task and columns for title, status, priority, area, project, deadline, duration, notes, and checklist. CSV values are quoted and embedded quotes are escaped. It is intended for spreadsheet analysis; it does not duplicate every internal database table and is not a backup.
+
 ## Delete semantics
 
 Confirmation is mandatory and explains that only the current workspace is reset. No automatic or required export occurs. Duplicate requests are blocked during work; errors are shown, and success is reported only after persistence cleanup commits.
@@ -45,6 +51,6 @@ If reading the reset workspace fails after commit, stale records are still disca
 
 ## Limits and device acceptance
 
-No import/restore, CSV, automatic backup, cloud backup/sync, or cloud-account deletion is implemented. Exports are unencrypted and loaded in memory; very large workspaces may require streaming in a future version. The native sharing plugin may create OS-managed temporary cache files; reset does not recall exports already saved/shared or securely erase storage media. Saved exports remain under the user's control.
+Paste-based JSON restore, task CSV, readable Markdown, and signed-in workspace synchronization are implemented. Automatic file backup and cloud-account deletion are not. Exports are unencrypted and loaded in memory; very large workspaces may require streaming in a future version. The native sharing plugin may create OS-managed temporary cache files; reset does not recall exports already saved/shared or securely erase storage media. Saved exports remain under the user's control.
 
 Automated tests verify the share-delivery arguments and JSON bytes, not native share-sheet behavior. On physical Android/iPhone (including an iPad popover where applicable), verify export save/cancel/error, then reset with pending notifications and confirm no alerts remain. Notification delivery, reboot, and OS reliability have not been physically validated.

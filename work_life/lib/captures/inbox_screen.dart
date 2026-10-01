@@ -24,6 +24,7 @@ class InboxScreen extends StatefulWidget {
     this.onLocalChange,
     this.scheduleImagePicker,
     this.scheduleAiClientFactory,
+    this.onOrganizeCapture,
   });
   final CaptureRepository repository;
   final ValueChanged<Capture>? onOpenCapture;
@@ -31,6 +32,7 @@ class InboxScreen extends StatefulWidget {
   final Future<void> Function()? onLocalChange;
   final ScheduleImagePicker? scheduleImagePicker;
   final ScheduleAiClientFactory? scheduleAiClientFactory;
+  final Future<void> Function(Capture capture)? onOrganizeCapture;
 
   @override
   State<InboxScreen> createState() => _InboxScreenState();
@@ -41,7 +43,7 @@ class _InboxScreenState extends State<InboxScreen> {
   final draft = TextEditingController();
   final search = TextEditingController();
   final assistant = const CaptureAssistant();
-  bool importingSchedule = false;
+  bool importingSchedule = false, organizing = false;
 
   @override
   void initState() {
@@ -75,6 +77,28 @@ class _InboxScreenState extends State<InboxScreen> {
         .showSnackBar(const SnackBar(content: Text('Saved on this device')));
   }
 
+  Future<void> organizeWithAi() async {
+    final action = widget.onOrganizeCapture;
+    if (action == null || organizing || model.saving) return;
+    setState(() => organizing = true);
+    final capture = await model.saveCapture(draft.text);
+    if (!mounted) return;
+    if (capture == null) {
+      setState(() => organizing = false);
+      return;
+    }
+    draft.clear();
+    search.clear();
+    FocusScope.of(context).unfocus();
+    final localChange = widget.onLocalChange;
+    if (localChange != null) unawaited(localChange());
+    try {
+      await action(capture);
+    } finally {
+      if (mounted) setState(() => organizing = false);
+    }
+  }
+
   Future<void> importScheduleImage() async {
     if (importingSchedule) return;
     setState(() => importingSchedule = true);
@@ -85,9 +109,9 @@ class _InboxScreenState extends State<InboxScreen> {
           await (widget.scheduleImagePicker?.call() ??
               ImagePicker().pickImage(
                 source: ImageSource.gallery,
-                maxWidth: 2048,
-                maxHeight: 2048,
-                imageQuality: 88,
+                maxWidth: 1800,
+                maxHeight: 1800,
+                imageQuality: 85,
               ));
     } catch (_) {
       if (mounted) {
@@ -108,10 +132,19 @@ class _InboxScreenState extends State<InboxScreen> {
     }
     if (kDebugMode) {
       debugPrint(
-        '[WORK_LIFE_IMPORT] image selected and preprocessed in ${selectionTimer.elapsedMilliseconds}ms',
+        '[WORK_LIFE_IMPORT] picker + user selection + native resize: ${selectionTimer.elapsedMilliseconds}ms (target max 1800px, JPEG quality 85)',
       );
     }
+    final importTimer = Stopwatch()..start();
     final client = widget.scheduleAiClientFactory?.call() ?? AimlApiClient();
+    final progress = ValueNotifier<ScheduleImportProgress>(
+      const ScheduleImportProgress(
+        stage: ScheduleImportStage.preparingImage,
+        elapsed: Duration.zero,
+      ),
+    );
+    Future<void>? dialogFuture;
+    Timer? progressTimer;
     var dialogOpen = false, cancelled = false;
     void cancel() {
       cancelled = true;
@@ -121,6 +154,7 @@ class _InboxScreenState extends State<InboxScreen> {
 
     if (!client.configured) {
       client.dispose();
+      progress.dispose();
       if (!mounted) return;
       setState(() => importingSchedule = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -131,16 +165,26 @@ class _InboxScreenState extends State<InboxScreen> {
       return;
     }
     dialogOpen = true;
-    unawaited(
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => _ScheduleImportProgressDialog(
-          onCancel: () {
-            cancel();
-            Navigator.of(context).pop();
-          },
-        ),
+    progressTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (cancelled) return;
+      final current = progress.value;
+      progress.value = ScheduleImportProgress(
+        stage: current.stage,
+        elapsed: current.elapsed + const Duration(seconds: 1),
+        inputBytes: current.inputBytes,
+        responseBytes: current.responseBytes,
+        serverTiming: current.serverTiming,
+      );
+    });
+    dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _ScheduleImportProgressDialog(
+        progress: progress,
+        onCancel: () {
+          cancel();
+          Navigator.of(context).pop();
+        },
       ),
     );
     try {
@@ -148,11 +192,16 @@ class _InboxScreenState extends State<InboxScreen> {
       final bytes = await image.readAsBytes();
       if (kDebugMode) {
         debugPrint(
-          '[WORK_LIFE_IMPORT] read ${bytes.length} bytes in ${readTimer.elapsedMilliseconds}ms',
+          '[WORK_LIFE_IMPORT] image read: ${readTimer.elapsedMilliseconds}ms; prepared upload: ${bytes.length} bytes',
         );
       }
       if (cancelled) return;
-      final result = await client.analyzeScheduleImage(bytes);
+      final result = await client.analyzeScheduleImage(
+        bytes,
+        onProgress: (value) {
+          if (!cancelled) progress.value = value;
+        },
+      );
       if (!mounted || cancelled) return;
       if (dialogOpen) {
         dialogOpen = false;
@@ -178,6 +227,11 @@ class _InboxScreenState extends State<InboxScreen> {
           ),
         ),
       );
+      if (kDebugMode) {
+        debugPrint(
+          '[WORK_LIFE_IMPORT] proposal route rendered; total after selection: ${importTimer.elapsedMilliseconds}ms',
+        );
+      }
     } catch (error) {
       if (mounted && !cancelled) {
         if (dialogOpen) {
@@ -198,6 +252,9 @@ class _InboxScreenState extends State<InboxScreen> {
       }
     } finally {
       client.dispose();
+      progressTimer.cancel();
+      await dialogFuture;
+      progress.dispose();
       if (mounted) setState(() => importingSchedule = false);
     }
   }
@@ -283,7 +340,7 @@ class _InboxScreenState extends State<InboxScreen> {
                   Text(
                     widget.onOpenCapture == null
                         ? 'A place for your work, your ideas, and the life around them.'
-                        : 'Capture now. Make sense of it when you have room.',
+                        : 'Write naturally. Keep it as a note or let AI turn it into a plan.',
                     style: theme.textTheme.bodyLarge,
                   ),
                   const SizedBox(height: 28),
@@ -332,19 +389,42 @@ class _InboxScreenState extends State<InboxScreen> {
                   FilledButton.icon(
                     onPressed:
                         model.saving ||
+                            organizing ||
+                            model.loading ||
+                            model.loadError != null ||
+                            draft.text.trim().isEmpty ||
+                            widget.onOrganizeCapture == null
+                        ? null
+                        : organizeWithAi,
+                    icon: Icon(
+                      organizing ? Icons.hourglass_top : Icons.auto_awesome,
+                    ),
+                    label: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(
+                        organizing ? 'Building your plan…' : 'Organize with AI',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed:
+                        model.saving ||
+                            organizing ||
                             model.loading ||
                             model.loadError != null ||
                             draft.text.trim().isEmpty
                         ? null
                         : save,
-                    icon: Icon(model.saving ? Icons.hourglass_top : Icons.add),
-                    label: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text(model.saving ? 'Saving…' : 'Save capture'),
+                    icon: Icon(
+                      model.saving
+                          ? Icons.hourglass_top
+                          : Icons.note_add_outlined,
                     ),
+                    label: Text(model.saving ? 'Saving…' : 'Save as note'),
                   ),
                   OutlinedButton.icon(
-                    onPressed: model.saving || importingSchedule
+                    onPressed: model.saving || organizing || importingSchedule
                         ? null
                         : importScheduleImage,
                     icon: Icon(
@@ -360,7 +440,7 @@ class _InboxScreenState extends State<InboxScreen> {
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Saved captures stay on this device. No account needed.',
+                    'AI always shows an editable proposal. Tasks, dates and reminders are only created after approval.',
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
@@ -473,44 +553,18 @@ class _InboxScreenState extends State<InboxScreen> {
   );
 }
 
-class _ScheduleImportProgressDialog extends StatefulWidget {
-  const _ScheduleImportProgressDialog({required this.onCancel});
+class _ScheduleImportProgressDialog extends StatelessWidget {
+  const _ScheduleImportProgressDialog({
+    required this.progress,
+    required this.onCancel,
+  });
+  final ValueListenable<ScheduleImportProgress> progress;
   final VoidCallback onCancel;
 
   @override
-  State<_ScheduleImportProgressDialog> createState() =>
-      _ScheduleImportProgressDialogState();
-}
-
-class _ScheduleImportProgressDialogState
-    extends State<_ScheduleImportProgressDialog> {
-  Timer? timer;
-  int seconds = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => seconds++);
-    });
-  }
-
-  @override
-  void dispose() {
-    timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final message = seconds < 4
-        ? 'Preparing the image…'
-        : seconds < 10
-        ? 'Finding classes and times…'
-        : seconds < 20
-        ? 'Preparing your editable timetable…'
-        : 'This is taking longer than usual. You can cancel and retry with a clearer image.';
-    return AlertDialog(
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: progress,
+    builder: (context, value, _) => AlertDialog(
       title: const Text('Reading your schedule'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
@@ -518,12 +572,23 @@ class _ScheduleImportProgressDialogState
         children: [
           const LinearProgressIndicator(),
           const SizedBox(height: 16),
-          Text(message),
+          Text(switch (value.stage) {
+            ScheduleImportStage.preparingImage => 'Preparing image…',
+            ScheduleImportStage.uploadingAndReading =>
+              'Uploading schedule and reading the timetable…',
+            ScheduleImportStage.buildingProposal =>
+              'Building your editable schedule…',
+            ScheduleImportStage.ready => 'Ready for review.',
+          }),
+          if (value.elapsed >= const Duration(seconds: 20)) ...[
+            const SizedBox(height: 8),
+            const Text(
+              'The AI provider is taking longer than usual. You can cancel safely and retry.',
+            ),
+          ],
         ],
       ),
-      actions: [
-        TextButton(onPressed: widget.onCancel, child: const Text('Cancel')),
-      ],
-    );
-  }
+      actions: [TextButton(onPressed: onCancel, child: const Text('Cancel'))],
+    ),
+  );
 }

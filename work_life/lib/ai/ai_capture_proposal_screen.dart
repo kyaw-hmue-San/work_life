@@ -10,11 +10,17 @@ class AiCaptureProposalScreen extends StatefulWidget {
     required this.model,
     required this.proposal,
     this.captureId,
+    this.onClarify,
   });
 
   final WorkspaceModel model;
   final AiCaptureProposal proposal;
   final String? captureId;
+  final Future<AiCaptureProposal> Function(
+    AiCaptureProposal current,
+    Map<String, String> answers,
+  )?
+  onClarify;
 
   @override
   State<AiCaptureProposalScreen> createState() =>
@@ -29,15 +35,18 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
   late final TextEditingController normal;
   late final TextEditingController strong;
   late final TextEditingController suggestedArea;
+  late AiCaptureProposal proposal;
+  final questionAnswers = <String, TextEditingController>{};
   late String area;
-  bool saving = false, createSuggestedArea = false;
+  bool saving = false, refining = false, createSuggestedArea = false;
 
-  AiTaskProposal? get task => widget.proposal.task;
-  AiRoutineProposal? get routine => widget.proposal.routine;
+  AiTaskProposal? get task => proposal.task;
+  AiRoutineProposal? get routine => proposal.routine;
 
   @override
   void initState() {
     super.initState();
+    proposal = widget.proposal;
     title = TextEditingController(text: task?.title ?? routine?.title ?? '');
     window = TextEditingController(text: routine?.window ?? '');
     minimum = TextEditingController(text: routine?.minimum ?? '');
@@ -51,6 +60,7 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
     suggestedArea = TextEditingController(
       text: _existingArea(requestedArea) == null ? requestedArea?.trim() : '',
     );
+    _resetQuestionAnswers();
   }
 
   @override
@@ -61,7 +71,80 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
     normal.dispose();
     strong.dispose();
     suggestedArea.dispose();
+    for (final controller in questionAnswers.values) {
+      controller.dispose();
+    }
     super.dispose();
+  }
+
+  void _resetQuestionAnswers() {
+    for (final controller in questionAnswers.values) {
+      controller.dispose();
+    }
+    questionAnswers
+      ..clear()
+      ..addEntries(
+        proposal.questions.map(
+          (question) => MapEntry(question, TextEditingController()),
+        ),
+      );
+  }
+
+  Future<void> clarify() async {
+    final action = widget.onClarify;
+    if (action == null || refining || saving) return;
+    final answers = <String, String>{
+      for (final entry in questionAnswers.entries)
+        if (entry.value.text.trim().isNotEmpty)
+          entry.key: entry.value.text.trim(),
+    };
+    if (answers.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Answer at least one question first.')),
+      );
+      return;
+    }
+    task?.title = title.text.trim();
+    if (routine case final value?) {
+      value
+        ..title = title.text.trim()
+        ..window = window.text.trim()
+        ..minimum = minimum.text.trim()
+        ..normal = normal.text.trim()
+        ..strong = strong.text.trim();
+    }
+    setState(() => refining = true);
+    try {
+      final replacement = await action(proposal, answers);
+      if (!mounted) return;
+      proposal = replacement;
+      final replacementTask = proposal.task;
+      final replacementRoutine = proposal.routine;
+      title.text = replacementTask?.title ?? replacementRoutine?.title ?? '';
+      window.text = replacementRoutine?.window ?? '';
+      minimum.text = replacementRoutine?.minimum ?? '';
+      normal.text = replacementRoutine?.normal ?? '';
+      strong.text = replacementRoutine?.strong ?? '';
+      final requestedArea = replacementTask?.area ?? replacementRoutine?.area;
+      area = _existingArea(requestedArea) ?? area;
+      suggestedArea.text = _existingArea(requestedArea) == null
+          ? requestedArea?.trim() ?? ''
+          : '';
+      _resetQuestionAnswers();
+      setState(() {});
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'AI could not update this draft. Your current edits are unchanged.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => refining = false);
+    }
   }
 
   String? _existingArea(String? value) {
@@ -110,6 +193,33 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
     });
   }
 
+  Future<void> pickPlannedStart() async {
+    final current =
+        DateTime.tryParse(task?.plannedStart ?? '')?.toLocal() ??
+        DateTime.now().add(const Duration(hours: 1));
+    final day = await showDatePicker(
+      context: context,
+      initialDate: current,
+      firstDate: DateTime.now(),
+      lastDate: DateTime(2200),
+    );
+    if (day == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(current),
+    );
+    if (time == null) return;
+    setState(() {
+      task!.plannedStart = DateTime(
+        day.year,
+        day.month,
+        day.day,
+        time.hour,
+        time.minute,
+      ).toIso8601String();
+    });
+  }
+
   Future<void> approve() async {
     if (saving) return;
     final text = title.text.trim();
@@ -124,7 +234,7 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
     final approvedArea = createSuggestedArea && suggestion.isNotEmpty
         ? reusedArea ?? suggestion
         : area;
-    widget.proposal.createArea =
+    proposal.createArea =
         createSuggestedArea && suggestion.isNotEmpty && reusedArea == null;
     task?.title = text;
     task?.area = approvedArea;
@@ -140,7 +250,7 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
     setState(() => saving = true);
     final ok = await widget.model.change(
       () => widget.model.repository.applyCaptureProposal(
-        widget.proposal,
+        proposal,
         operationId: operationId,
         captureId: widget.captureId,
       ),
@@ -155,7 +265,7 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isReminder = widget.proposal.kind == AiCaptureKind.reminder;
+    final isReminder = proposal.kind == AiCaptureKind.reminder;
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -270,28 +380,42 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
                     : 'Due ${value.deadline}',
               ),
             ),
-            if (isReminder) ...[
-              OutlinedButton.icon(
-                onPressed: saving ? null : pickReminder,
-                icon: const Icon(Icons.notifications_outlined),
-                label: Text(
-                  value.reminder == null
-                      ? 'Choose reminder time'
-                      : MaterialLocalizations.of(context).formatFullDate(
-                          DateTime.parse(value.reminder!).toLocal(),
-                        ),
-                ),
-              ),
-              if (value.reminder != null)
-                Text(
-                  MaterialLocalizations.of(context).formatTimeOfDay(
-                    TimeOfDay.fromDateTime(
-                      DateTime.parse(value.reminder!).toLocal(),
-                    ),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: saving ? null : pickPlannedStart,
+                  icon: const Icon(Icons.calendar_month_outlined),
+                  label: Text(
+                    value.plannedStart == null
+                        ? 'Add to calendar'
+                        : 'Calendar time set',
                   ),
-                  textAlign: TextAlign.center,
                 ),
-            ],
+                OutlinedButton.icon(
+                  onPressed: saving ? null : pickReminder,
+                  icon: const Icon(Icons.notifications_outlined),
+                  label: Text(
+                    value.reminder == null ? 'Add reminder' : 'Reminder set',
+                  ),
+                ),
+              ],
+            ),
+            if (value.plannedStart != null)
+              TextButton(
+                onPressed: saving
+                    ? null
+                    : () => setState(() => value.plannedStart = null),
+                child: const Text('Clear calendar time'),
+              ),
+            if (value.reminder != null && !isReminder)
+              TextButton(
+                onPressed: saving
+                    ? null
+                    : () => setState(() => value.reminder = null),
+                child: const Text('Clear reminder'),
+              ),
             TextFormField(
               initialValue: value.checklist.join('\n'),
               minLines: 2,
@@ -330,14 +454,51 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
               decoration: const InputDecoration(labelText: 'Strong version'),
             ),
           ],
-          if (widget.proposal.questions.isNotEmpty) ...[
+          if (proposal.questions.isNotEmpty) ...[
             const SizedBox(height: 16),
-            Text(
-              'Check before approving',
-              style: Theme.of(context).textTheme.titleMedium,
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Help AI finish the plan',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    for (final question in proposal.questions) ...[
+                      Text(question),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: questionAnswers[question],
+                        enabled: !saving && !refining,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(
+                          hintText: 'Type your answer…',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    if (widget.onClarify != null)
+                      FilledButton.tonalIcon(
+                        onPressed: refining ? null : clarify,
+                        icon: refining
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.auto_awesome),
+                        label: Text(
+                          refining ? 'Updating plan…' : 'Update with answers',
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ),
-            for (final question in widget.proposal.questions)
-              Text('• $question'),
           ],
           const SizedBox(height: 24),
           FilledButton.icon(
@@ -347,7 +508,7 @@ class _AiCaptureProposalScreenState extends State<AiCaptureProposalScreen> {
           ),
           TextButton(
             onPressed: saving ? null : () => Navigator.pop(context, false),
-            child: const Text('Reject proposal'),
+            child: const Text('Keep only the original note'),
           ),
         ],
       ),

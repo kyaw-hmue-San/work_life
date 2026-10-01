@@ -18,6 +18,7 @@ function safeError(status: number, message: string): Response {
 }
 
 Deno.serve(async (request) => {
+  const requestStarted = performance.now();
   if (request.method !== "POST") {
     return safeError(405, "Method not allowed.");
   }
@@ -37,9 +38,11 @@ Deno.serve(async (request) => {
     return safeError(503, "AI service is not configured.");
   }
 
+  const authStarted = performance.now();
   const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
     headers: { authorization: auth, apikey: publishableKey },
   });
+  const authMs = performance.now() - authStarted;
   if (!userResponse.ok) return safeError(401, "Your session is not valid.");
 
   let text: string;
@@ -81,6 +84,7 @@ Deno.serve(async (request) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
+    const providerStarted = performance.now();
     const upstream = await fetch(`${providerUrl}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
@@ -90,6 +94,7 @@ Deno.serve(async (request) => {
       },
       body: JSON.stringify(providerRequest),
     });
+    const providerMs = performance.now() - providerStarted;
     if (!upstream.ok) {
       const status = upstream.status === 429 ? 429 : upstream.status >= 500
         ? 503
@@ -98,7 +103,10 @@ Deno.serve(async (request) => {
     }
     return new Response(await upstream.text(), {
       status: 200,
-      headers: jsonHeaders,
+      headers: {
+        ...jsonHeaders,
+        "server-timing": `auth;dur=${authMs.toFixed(1)}, provider;dur=${providerMs.toFixed(1)}, total;dur=${(performance.now() - requestStarted).toFixed(1)}`,
+      },
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {

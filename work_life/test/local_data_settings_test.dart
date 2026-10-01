@@ -64,7 +64,7 @@ void main() {
         'New capture',
       );
       await tester.pump();
-      await tap(tester, find.text('Save capture'));
+      await tap(tester, find.text('Save as note'));
       expect(alice.captures.single.originalText, 'New capture');
       await tester.pumpWidget(const SizedBox());
       await tester.pumpAndSettle();
@@ -109,42 +109,50 @@ void main() {
     },
   );
 
-  testWidgets(
-    'export action delivers a JSON file to the existing sharing plugin',
-    (tester) async {
-      tester.view.physicalSize = const Size(800, 1600);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      final model = WorkspaceModel(MemoryWorkspace());
-      await model.load();
-      ShareParams? shared;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: SettingsScreen(
-            model: model,
-            share: (params) async {
-              shared = params;
-              return const ShareResult('', ShareResultStatus.dismissed);
-            },
-          ),
+  testWidgets('backup and readable exports share purpose-specific files', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final model = WorkspaceModel(MemoryWorkspace());
+    await model.load();
+    final shared = <ShareParams>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(
+          model: model,
+          share: (params) async {
+            shared.add(params);
+            return const ShareResult('', ShareResultStatus.dismissed);
+          },
         ),
-      );
-      await tap(tester, find.text('Export my data'));
-      expect(shared, isNotNull);
-      expect(shared!.files!.single.mimeType, 'application/json');
-      expect(shared!.fileNameOverrides, ['work_life_export.json']);
-      expect(shared!.sharePositionOrigin!.isEmpty, isFalse);
-      expect(
-        jsonDecode(
-          utf8.decode(await shared!.files!.single.readAsBytes()),
-        )['formatVersion'],
-        1,
-      );
-      await tester.pumpWidget(const SizedBox());
-      model.dispose();
-    },
-  );
+      ),
+    );
+    await tap(tester, find.text('Create backup'));
+    expect(shared.single.files!.single.mimeType, 'application/json');
+    expect(shared.single.fileNameOverrides, ['work_life_backup.json']);
+    expect(shared.single.sharePositionOrigin!.isEmpty, isFalse);
+    expect(
+      jsonDecode(
+        utf8.decode(await shared.single.files!.single.readAsBytes()),
+      )['formatVersion'],
+      1,
+    );
+    await tap(tester, find.text('Export readable report'));
+    expect(shared.last.files!.single.mimeType, 'text/markdown');
+    expect(shared.last.fileNameOverrides, ['work_life_report.md']);
+    expect(
+      utf8.decode(await shared.last.files!.single.readAsBytes()),
+      contains('# Work Life report'),
+    );
+    await tap(tester, find.text('Export tasks as CSV'));
+    expect(shared.last.files!.single.mimeType, 'text/csv');
+    expect(shared.last.fileNameOverrides, ['work_life_tasks.csv']);
+    await tester.pumpWidget(const SizedBox());
+    model.dispose();
+  });
 }
 
 class _SlowReset extends MemoryWorkspace {

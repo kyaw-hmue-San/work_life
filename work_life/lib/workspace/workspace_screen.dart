@@ -284,7 +284,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
               label: const Text('Open notification settings'),
             ),
           )
-        else if (notifications.permission == NotificationPermission.allowed &&
+        else if (notifications.permission?.canSchedule == true &&
             notifications.message.startsWith('Couldn’t'))
           Align(
             alignment: Alignment.centerLeft,
@@ -467,6 +467,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       final proposal = await client.classifyCapture(
         capture.originalText,
         existingAreas: model.data.areas,
+        planningContext: _capturePlanningContext(),
       );
       if (!mounted) return;
       Navigator.pop(context);
@@ -478,6 +479,13 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
               model: model,
               proposal: proposal.project!,
               captureId: capture.id,
+              onClarify: (current, answers) => client.refineCaptureProject(
+                originalInput: capture.originalText,
+                proposal: current,
+                answers: answers,
+                existingAreas: model.data.areas,
+                planningContext: _capturePlanningContext(),
+              ),
             ),
           ),
         );
@@ -503,6 +511,13 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
               model: model,
               proposal: proposal,
               captureId: capture.id,
+              onClarify: (current, answers) => client.refineCapture(
+                originalInput: capture.originalText,
+                proposal: current,
+                answers: answers,
+                existingAreas: model.data.areas,
+                planningContext: _capturePlanningContext(),
+              ),
             ),
           ),
         );
@@ -521,6 +536,46 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
     } finally {
       client.dispose();
     }
+  }
+
+  Map<String, Object?> _capturePlanningContext() {
+    final now = DateTime.now();
+    final horizon = now.add(const Duration(days: 14));
+    final preferences = model.data.planningPreferences;
+    return {
+      'existingCalendar': model.data.plans
+          .where(
+            (block) => block.end.isAfter(now) && block.start.isBefore(horizon),
+          )
+          .map(
+            (block) => {
+              'title': block.title,
+              'start': block.start.toIso8601String(),
+              'minutes': block.minutes,
+              'fixed': block.fixed,
+            },
+          )
+          .toList(),
+      'weeklyCommitments': model.data.recurringSchedules
+          .map(
+            (item) => {
+              'title': item.title,
+              'weekday': item.weekday,
+              'start': item.startTime,
+              'end': item.endTime,
+              'location': item.location,
+              'fixed': item.fixed,
+            },
+          )
+          .toList(),
+      'preferences': {
+        'wakeTime': preferences.wakeTime,
+        'bedTime': preferences.bedTime,
+        'transitionMinutes': preferences.transitionMinutes,
+        'avoidFocusAfter': preferences.avoidFocusAfter,
+        'maxFocusMinutes': preferences.maxFocusMinutes,
+      },
+    };
   }
 
   Future<AiProjectProposal> _requestProjectImprovement(
@@ -618,6 +673,16 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       );
       final result = await client.planDay(jsonEncode(dayContext));
       final dayKeyValue = dayKey(day);
+      if (result.events.isEmpty) {
+        throw const FormatException('AI returned an empty day plan.');
+      }
+      if (result.events.any(
+        (event) => event.date != null && event.date != dayKeyValue,
+      )) {
+        throw const FormatException(
+          'AI returned a block outside the selected day.',
+        );
+      }
       result.baseFingerprints[dayKeyValue] = const DayContextBuilder()
           .fingerprint(model.data, day);
       final commitments = (dayContext['fixedCommitments'] as List)
@@ -742,7 +807,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '${error is AiServiceException ? error.message : 'Couldn’t create a day plan.'} Your current Planner was not changed.',
+            '${_planningFailure(error, 'Couldn’t create a day plan.')} Your current Planner was not changed.',
           ),
         ),
       );
@@ -763,6 +828,22 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
           builder.buildPlanningContext(model.data, monday, request: request),
         ),
       );
+      final weekEnd = calendarDay(monday, 7);
+      if (result.events.isEmpty) {
+        throw const FormatException('AI returned an empty weekly plan.');
+      }
+      for (final event in result.events) {
+        if (event.date case final date?) {
+          final parsed = DateTime.tryParse(date);
+          if (parsed == null ||
+              parsed.isBefore(monday) ||
+              !parsed.isBefore(weekEnd)) {
+            throw const FormatException(
+              'AI returned a block outside the selected week.',
+            );
+          }
+        }
+      }
       result.baseFingerprints.addAll(builder.fingerprints(model.data, monday));
 
       for (final dayContext in contexts) {
@@ -864,6 +945,14 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
   String _planClock(DateTime value) =>
       '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
 
+  String _planningFailure(Object error, String fallback) {
+    if (error is AiServiceException) return error.message;
+    if (error is FormatException) {
+      return 'AI returned an incomplete or inconsistent schedule. Try again with exact dates and availability.';
+    }
+    return fallback;
+  }
+
   Future<void> _planWeekWithAi(DateTime selected) async {
     final availability = AimlApiClient();
     final configured = availability.configured;
@@ -909,7 +998,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '${error is AiServiceException ? error.message : 'Couldn’t create a weekly plan.'} Your current Planner was not changed.',
+            '${_planningFailure(error, 'Couldn’t create a weekly plan.')} Your current Planner was not changed.',
           ),
         ),
       );
@@ -1859,6 +1948,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen>
                                 key: ValueKey(model.resetRevision),
                                 repository: widget.repository,
                                 onOpenCapture: openCapture,
+                                onOrganizeCapture: _organizeWithAi,
                                 workspaceModel: model,
                                 onLocalChange: widget.sync?.sync,
                               ),

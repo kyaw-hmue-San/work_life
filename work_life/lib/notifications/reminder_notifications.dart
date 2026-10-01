@@ -112,18 +112,6 @@ class ReminderNotifications extends ChangeNotifier {
             });
       permission = await driver.permission(request: requestPermission);
       if (generation != _generation) return;
-      // Ask at the moment the user creates their first future reminder. This
-      // is contextual, unlike an unexplained launch-time permission dialog.
-      if (permission == NotificationPermission.notDetermined &&
-          reminders.any(
-            (reminder) => effectiveReminderTime(
-              reminder.scheduledAt,
-              data.quietHours,
-            ).isAfter(now()),
-          )) {
-        permission = await driver.permission(request: true);
-        if (generation != _generation) return;
-      }
       final future = reminders
           .where(
             (r) => effectiveReminderTime(
@@ -135,7 +123,7 @@ class ReminderNotifications extends ChangeNotifier {
           .toList();
       final wanted = <int, String>{};
       final ids = <String, int>{};
-      if (permission == NotificationPermission.allowed) {
+      if (permission!.canSchedule) {
         for (final reminder in reminders.where(
           (r) =>
               !effectiveReminderTime(
@@ -195,10 +183,11 @@ class ReminderNotifications extends ChangeNotifier {
         String status;
         if (!effective.isAfter(now())) {
           status = 'elapsed';
-        } else if (permission != NotificationPermission.allowed) {
+        } else if (!permission!.canSchedule) {
           status = switch (permission) {
             NotificationPermission.unsupported => 'unsupported',
             NotificationPermission.notDetermined => 'permission_required',
+            NotificationPermission.provisional => 'scheduled',
             _ => 'blocked',
           };
         } else if (!future.any((r) => r.id == reminder.id)) {
@@ -231,6 +220,7 @@ class ReminderNotifications extends ChangeNotifier {
                             .length
                     ? 'Device notifications enabled. Some later reminders are waiting; open the app to refresh. Your device may delay alerts.'
                     : 'Device notifications enabled. Your device may delay alerts.',
+              NotificationPermission.provisional => 'Notifications are delivered quietly. You can allow prominent alerts in iPhone Settings.',
               NotificationPermission.blocked => 'Device notifications are off. Enable permission or change system settings; reminders remain in Today.',
               NotificationPermission.notDetermined => 'Enable device notifications when you add a reminder. Your reminders remain in Today.',
               _ => 'Device notifications are supported on Android and iPhone. Reminders remain in Today.',

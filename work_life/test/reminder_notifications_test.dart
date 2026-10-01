@@ -72,7 +72,7 @@ void main() {
   });
 
   test(
-    'first future reminder requests undecided permission contextually',
+    'reconciliation never opens the native permission prompt implicitly',
     () async {
       final driver = FakeNotifications()
         ..state = NotificationPermission.notDetermined
@@ -80,11 +80,30 @@ void main() {
       final service = ReminderNotifications(driver, now: () => now);
       final repo = workspace();
       await service.reconcile(service.attach('guest'), repo);
+      expect(driver.permissionRequests, 0);
+      expect(driver.alerts, isEmpty);
+      expect(repo.reminders.single.deliveryStatus, 'permission_required');
+      await service.reconcile(
+        service.attach('guest'),
+        repo,
+        requestPermission: true,
+      );
       expect(driver.permissionRequests, 1);
       expect(driver.alerts, hasLength(1));
       expect(repo.reminders.single.deliveryStatus, 'scheduled');
     },
   );
+
+  test('provisional iOS permission still schedules quiet alerts', () async {
+    final driver = FakeNotifications()
+      ..state = NotificationPermission.provisional;
+    final service = ReminderNotifications(driver, now: () => now);
+    final repo = workspace();
+    await service.reconcile(service.attach('guest'), repo);
+    expect(driver.alerts, hasLength(1));
+    expect(repo.reminders.single.deliveryStatus, 'scheduled');
+    expect(service.message, contains('quietly'));
+  });
 
   test(
     'does not request undecided permission without a future reminder',
